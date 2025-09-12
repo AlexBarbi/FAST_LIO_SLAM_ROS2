@@ -13,12 +13,11 @@ def generate_launch_description():
         "rvizscpgo", default_value="true", description="Launch RViz for SC-PGO"
     )
     namespace_arg = DeclareLaunchArgument(
-        "namespace", default_value="j100_0819", description="Namespace for all nodes"
+        "namespace", default_value="", description="Namespace for all nodes"
     )
 
     namespace = LaunchConfiguration("namespace")
 
-    # Node: alaserPGO
     alaserPGO_node = Node(
         package="sc_pgo_ros2",
         executable="alaserPGO",

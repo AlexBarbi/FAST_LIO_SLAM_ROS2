@@ -298,29 +298,6 @@ void lasermap_fov_segment() {
   kdtree_delete_time = omp_get_wtime() - delete_begin;
 }
 
-void standard_pcl_cbk(const sensor_msgs::msg::PointCloud2::UniquePtr msg) {
-  mtx_buffer.lock();
-  scan_count++;
-  double cur_time = get_time_sec(msg->header.stamp);
-  double preprocess_start_time = omp_get_wtime();
-  if (!is_first_lidar && cur_time < last_timestamp_lidar) {
-    std::cerr << "lidar loop back, clear buffer" << std::endl;
-    lidar_buffer.clear();
-  }
-  if (is_first_lidar) {
-    is_first_lidar = false;
-  }
-
-  PointCloudXYZI::Ptr ptr(new PointCloudXYZI());
-  p_pre->process(msg, ptr);
-  lidar_buffer.push_back(ptr);
-  time_buffer.push_back(cur_time);
-  last_timestamp_lidar = cur_time;
-  s_plot11[scan_count] = omp_get_wtime() - preprocess_start_time;
-  mtx_buffer.unlock();
-  sig_buffer.notify_all();
-}
-
 double timediff_lidar_wrt_imu = 0.0;
 bool timediff_set_flg = false;
 void livox_pcl_cbk(const livox_ros_driver2::msg::CustomMsg::UniquePtr msg) {
@@ -554,25 +531,6 @@ void publish_frame_world(
   */
 }
 
-void publish_frame_body(
-    rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr
-        pubLaserCloudFull_body) {
-  int size = feats_undistort->points.size();
-  PointCloudXYZI::Ptr laserCloudIMUBody(new PointCloudXYZI(size, 1));
-
-  for (int i = 0; i < size; i++) {
-    RGBpointBodyLidarToIMU(&feats_undistort->points[i],
-                           &laserCloudIMUBody->points[i]);
-  }
-
-  sensor_msgs::msg::PointCloud2 laserCloudmsg;
-  pcl::toROSMsg(*laserCloudIMUBody, laserCloudmsg);
-  laserCloudmsg.header.stamp = get_ros_time(lidar_end_time);
-  laserCloudmsg.header.frame_id = "os0_sensor";
-  pubLaserCloudFull_body->publish(laserCloudmsg);
-  publish_count -= PUBFRAME_PERIOD;
-}
-
 void publish_effect_world(
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr
         pubLaserCloudEffect) {
@@ -628,39 +586,6 @@ void set_posestamp(T &out) {
   out.pose.orientation.y = geoQuat.y;
   out.pose.orientation.z = geoQuat.z;
   out.pose.orientation.w = geoQuat.w;
-}
-
-void publish_odometry(const rclcpp::Publisher<
-                          nav_msgs::msg::Odometry>::SharedPtr pubOdomAftMapped,
-                      std::unique_ptr<tf2_ros::TransformBroadcaster> &tf_br) {
-  odomAftMapped.header.frame_id = "camera_init";
-  odomAftMapped.child_frame_id = "body";
-  odomAftMapped.header.stamp = get_ros_time(lidar_end_time);
-  set_posestamp(odomAftMapped.pose);
-  pubOdomAftMapped->publish(odomAftMapped);
-  auto P = kf.get_P();
-  for (int i = 0; i < 6; i++) {
-    int k = i < 3 ? i + 3 : i - 3;
-    odomAftMapped.pose.covariance[i * 6 + 0] = P(k, 3);
-    odomAftMapped.pose.covariance[i * 6 + 1] = P(k, 4);
-    odomAftMapped.pose.covariance[i * 6 + 2] = P(k, 5);
-    odomAftMapped.pose.covariance[i * 6 + 3] = P(k, 0);
-    odomAftMapped.pose.covariance[i * 6 + 4] = P(k, 1);
-    odomAftMapped.pose.covariance[i * 6 + 5] = P(k, 2);
-  }
-
-  geometry_msgs::msg::TransformStamped trans;
-  trans.header.frame_id = "camera_init";
-  trans.header.stamp = odomAftMapped.header.stamp;
-  trans.child_frame_id = "body";
-  trans.transform.translation.x = odomAftMapped.pose.pose.position.x;
-  trans.transform.translation.y = odomAftMapped.pose.pose.position.y;
-  trans.transform.translation.z = odomAftMapped.pose.pose.position.z;
-  trans.transform.rotation.w = odomAftMapped.pose.pose.orientation.w;
-  trans.transform.rotation.x = odomAftMapped.pose.pose.orientation.x;
-  trans.transform.rotation.y = odomAftMapped.pose.pose.orientation.y;
-  trans.transform.rotation.z = odomAftMapped.pose.pose.orientation.z;
-  tf_br->sendTransform(trans);
 }
 
 void publish_path(rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr pubPath) {
@@ -796,6 +721,9 @@ void h_share_model(state_ikfom &s,
 
 class LaserMappingNode : public rclcpp::Node {
  public:
+  std::string lidar_frame_ =
+      "body";  // temp: gets updated on first message received
+
   LaserMappingNode(const rclcpp::NodeOptions &options = rclcpp::NodeOptions())
       : Node("laser_mapping", options) {
     this->declare_parameter<bool>("publish.path_en", true);
@@ -942,7 +870,9 @@ class LaserMappingNode : public rclcpp::Node {
               lid_topic, 20, livox_pcl_cbk);
     } else {
       sub_pcl_pc_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
-          lid_topic, rclcpp::SensorDataQoS(), standard_pcl_cbk);
+          lid_topic, rclcpp::SensorDataQoS(),
+          std::bind(&LaserMappingNode::standard_pcl_cbk, this,
+                    std::placeholders::_1));
     }
     sub_imu_ = this->create_subscription<sensor_msgs::msg::Imu>(
         imu_topic, rclcpp::SensorDataQoS(), imu_cbk);
@@ -988,6 +918,83 @@ class LaserMappingNode : public rclcpp::Node {
   }
 
  private:
+  void standard_pcl_cbk(const sensor_msgs::msg::PointCloud2::UniquePtr msg) {
+    mtx_buffer.lock();
+    scan_count++;
+    double cur_time = get_time_sec(msg->header.stamp);
+    double preprocess_start_time = omp_get_wtime();
+    if (!is_first_lidar && cur_time < last_timestamp_lidar) {
+      std::cerr << "lidar loop back, clear buffer" << std::endl;
+      lidar_buffer.clear();
+    }
+    if (is_first_lidar) {
+      is_first_lidar = false;
+
+      lidar_frame_ = msg->header.frame_id;
+    }
+
+    PointCloudXYZI::Ptr ptr(new PointCloudXYZI());
+    p_pre->process(msg, ptr);
+    lidar_buffer.push_back(ptr);
+    time_buffer.push_back(cur_time);
+    last_timestamp_lidar = cur_time;
+    s_plot11[scan_count] = omp_get_wtime() - preprocess_start_time;
+    mtx_buffer.unlock();
+    sig_buffer.notify_all();
+  }
+
+  void publish_odometry(
+      const rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr
+          pubOdomAftMapped,
+      std::unique_ptr<tf2_ros::TransformBroadcaster> &tf_br) {
+    odomAftMapped.header.frame_id = "camera_init";
+    odomAftMapped.child_frame_id = lidar_frame_;
+    odomAftMapped.header.stamp = get_ros_time(lidar_end_time);
+    set_posestamp(odomAftMapped.pose);
+    pubOdomAftMapped->publish(odomAftMapped);
+    auto P = kf.get_P();
+    for (int i = 0; i < 6; i++) {
+      int k = i < 3 ? i + 3 : i - 3;
+      odomAftMapped.pose.covariance[i * 6 + 0] = P(k, 3);
+      odomAftMapped.pose.covariance[i * 6 + 1] = P(k, 4);
+      odomAftMapped.pose.covariance[i * 6 + 2] = P(k, 5);
+      odomAftMapped.pose.covariance[i * 6 + 3] = P(k, 0);
+      odomAftMapped.pose.covariance[i * 6 + 4] = P(k, 1);
+      odomAftMapped.pose.covariance[i * 6 + 5] = P(k, 2);
+    }
+
+    geometry_msgs::msg::TransformStamped trans;
+    trans.header.frame_id = "camera_init";
+    trans.header.stamp = odomAftMapped.header.stamp;
+    trans.child_frame_id = lidar_frame_;
+    trans.transform.translation.x = odomAftMapped.pose.pose.position.x;
+    trans.transform.translation.y = odomAftMapped.pose.pose.position.y;
+    trans.transform.translation.z = odomAftMapped.pose.pose.position.z;
+    trans.transform.rotation.w = odomAftMapped.pose.pose.orientation.w;
+    trans.transform.rotation.x = odomAftMapped.pose.pose.orientation.x;
+    trans.transform.rotation.y = odomAftMapped.pose.pose.orientation.y;
+    trans.transform.rotation.z = odomAftMapped.pose.pose.orientation.z;
+    tf_br->sendTransform(trans);
+  }
+  void publish_frame_body(
+      rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr
+          pubLaserCloudFull_body) {
+    int size = feats_undistort->points.size();
+    PointCloudXYZI::Ptr laserCloudIMUBody(new PointCloudXYZI(size, 1));
+
+    for (int i = 0; i < size; i++) {
+      RGBpointBodyLidarToIMU(&feats_undistort->points[i],
+                             &laserCloudIMUBody->points[i]);
+    }
+
+    sensor_msgs::msg::PointCloud2 laserCloudmsg;
+    pcl::toROSMsg(*laserCloudIMUBody, laserCloudmsg);
+    laserCloudmsg.header.stamp = get_ros_time(lidar_end_time);
+    laserCloudmsg.header.frame_id = lidar_frame_;
+    pubLaserCloudFull_body->publish(laserCloudmsg);
+    publish_count -= PUBFRAME_PERIOD;
+  }
+
   void timer_callback() {
     if (sync_packages(Measures)) {
       if (flg_first_scan) {
