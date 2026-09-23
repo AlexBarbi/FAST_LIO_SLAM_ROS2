@@ -31,10 +31,12 @@ parser.add_argument("--color", choices=["auto", "intensity", "height"], default=
 parser.add_argument("--no-floor", action="store_true",
                     help="hide the floor in the viewer: the points up to --floor-margin above the estimated floor height. The saved map keeps them.")
 parser.add_argument("--floor-margin", type=float, default=0.15, help="height above the estimated floor that --no-floor hides, in m (default: 0.15)")
+parser.add_argument("--point-size", type=float, default=1.0,
+                    help="viewer point size in pixels, also used by the screenshots saved with P (default: 1, the smallest; Open3D's default is 5)")
 args = parser.parse_args()
 
 data_dir = os.path.join(os.path.expanduser(args.data_dir), "")
-scan_idx_range_to_stack = [0, 200] # if you want a whole map, use [0, len(scan_files)]
+scan_idx_range_to_stack = [0, 1000] # if you want a whole map, use [0, len(scan_files)]
 node_skip = 1
 
 num_points_in_a_scan = 150000 # for reservation (save faster) // e.g., use 150000 for 128 ray lidars, 100000 for 64 ray lidars, 30000 for 16 ray lidars, if error occured, use the larger value.
@@ -167,6 +169,7 @@ if(is_o3d_vis or is_live_vis):
 if(is_live_vis):
     vis = o3d.visualization.Visualizer()
     vis.create_window('Map', visible = True)
+    vis.get_render_option().point_size = args.point_size
 
     scan_start = 0
     for scan_end in scan_ends:
@@ -187,7 +190,13 @@ if(is_o3d_vis):
     print("draw the merged map.")
     pcd_combined_for_vis.points = o3d.utility.Vector3dVector(np_xyz_all[vis_mask])
     pcd_combined_for_vis.colors = o3d.utility.Vector3dVector(colors_all[vis_mask])
-    o3d.visualization.draw_geometries([pcd_combined_for_vis])
+    # draw_geometries has no point size option, so build the window by hand
+    map_vis = o3d.visualization.Visualizer()
+    map_vis.create_window('Merged map')
+    map_vis.add_geometry(pcd_combined_for_vis)
+    map_vis.get_render_option().point_size = args.point_size
+    map_vis.run()
+    map_vis.destroy_window()
 
 
 # save ply having intensity
