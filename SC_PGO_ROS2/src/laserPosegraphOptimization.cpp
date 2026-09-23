@@ -2,6 +2,7 @@
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
 
+#include <cstdio>
 #include <fstream>
 #include <iostream>
 #include <mutex>
@@ -159,9 +160,17 @@ gtsam::Pose3 Pose6DtoGTSAMPose3(const Pose6D &p) {
                       gtsam::Point3(p.x, p.y, p.z));
 }  // Pose6DtoGTSAMPose3
 
+// Pose files are rewritten every isam cycle; write to a temp file and rename it
+// over the old one, so a shutdown mid-write never leaves a truncated file.
+void replaceFile(const std::string &_tmpname, const std::string &_filename) {
+  if (std::rename(_tmpname.c_str(), _filename.c_str()) != 0)
+    std::cerr << "failed to replace " << _filename << std::endl;
+}
+
 void saveOdometryVerticesKITTIformat(std::string _filename) {
   // ref from gtsam's original code "dataset.cpp"
-  std::fstream stream(_filename.c_str(), std::fstream::out);
+  const std::string tmpname = _filename + ".tmp";
+  std::fstream stream(tmpname.c_str(), std::fstream::out);
   for (const auto &_pose6d : keyframePoses) {
     gtsam::Pose3 pose = Pose6DtoGTSAMPose3(_pose6d);
     Point3 t = pose.translation();
@@ -175,6 +184,8 @@ void saveOdometryVerticesKITTIformat(std::string _filename) {
            << t.y() << " " << col1.z() << " " << col2.z() << " " << col3.z()
            << " " << t.z() << std::endl;
   }
+  stream.close();
+  replaceFile(tmpname, _filename);
 }
 
 void saveOptimizedVerticesKITTIformat(gtsam::Values _estimates,
@@ -182,7 +193,8 @@ void saveOptimizedVerticesKITTIformat(gtsam::Values _estimates,
   using namespace gtsam;
 
   // ref from gtsam's original code "dataset.cpp"
-  std::fstream stream(_filename.c_str(), std::fstream::out);
+  const std::string tmpname = _filename + ".tmp";
+  std::fstream stream(tmpname.c_str(), std::fstream::out);
 
   for (const auto &key_value : _estimates) {
     auto p = dynamic_cast<const GenericValue<Pose3> *>(&key_value.value);
@@ -201,6 +213,8 @@ void saveOptimizedVerticesKITTIformat(gtsam::Values _estimates,
            << t.y() << " " << col1.z() << " " << col2.z() << " " << col3.z()
            << " " << t.z() << std::endl;
   }
+  stream.close();
+  replaceFile(tmpname, _filename);
 }
 
 void laserOdometryHandler(
@@ -896,13 +910,15 @@ int main(int argc, char **argv) {
   nh->declare_parameter<double>("keyframe_deg_gap", 10.0);
   keyframeDegGap = nh->get_parameter("keyframe_deg_gap").as_double();
 
+  pgKITTIformat = save_directory + "optimized_poses.txt";
   odomKITTIformat = save_directory + "odom_poses.txt";
-  pgTimeSaveStream =
-      std::fstream(save_directory + "times.txt", std::fstream::out);
-  pgTimeSaveStream.precision(std::numeric_limits<double>::max_digits10);
+  // Create save_directory (via Scans/) before opening files in it
   pgScansDirectory = save_directory + "Scans/";
   auto unused = system((std::string("exec rm -r ") + pgScansDirectory).c_str());
   unused = system((std::string("mkdir -p ") + pgScansDirectory).c_str());
+  pgTimeSaveStream =
+      std::fstream(save_directory + "times.txt", std::fstream::out);
+  pgTimeSaveStream.precision(std::numeric_limits<double>::max_digits10);
 
   keyframeRadGap = deg2rad(keyframeDegGap);
 
@@ -979,5 +995,8 @@ int main(int argc, char **argv) {
       process_viz_path};  // visualization - path (high frequency)
 
   rclcpp::spin(nh);
-  return 0;
+  rclcpp::shutdown();
+  // The worker threads loop forever (or sleep up to 10 s) and are never joined:
+  // returning would destroy joinable std::threads and call std::terminate.
+  std::_Exit(0);
 }

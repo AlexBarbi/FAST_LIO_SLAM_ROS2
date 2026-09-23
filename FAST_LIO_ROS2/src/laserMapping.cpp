@@ -114,6 +114,7 @@ vector<BoxPointType> cub_needrm;
 vector<PointVector> Nearest_Points;
 vector<double> extrinT(3, 0.0);
 vector<double> extrinR(9, 0.0);
+vector<double> imuR(9, 0.0);
 deque<double> time_buffer;
 deque<PointCloudXYZI::Ptr> lidar_buffer;
 deque<sensor_msgs::msg::Imu::ConstSharedPtr> imu_buffer;
@@ -138,6 +139,9 @@ V3D euler_cur;
 V3D position_last(Zero3d);
 V3D Lidar_T_wrt_IMU(Zero3d);
 M3D Lidar_R_wrt_IMU(Eye3d);
+// Rotation from the IMU sensor frame to the estimated body frame. Lets the body
+// (and camera_init) frame be upright when the IMU is mounted tilted/inverted.
+M3D IMU_R_body(Eye3d);
 
 /*** EKF inputs and output ***/
 MeasureGroup Measures;
@@ -343,6 +347,19 @@ void imu_cbk(const sensor_msgs::msg::Imu::UniquePtr msg_in) {
   publish_count++;
   // cout<<"IMU got at: "<<msg_in->header.stamp.toSec()<<endl;
   sensor_msgs::msg::Imu::SharedPtr msg(new sensor_msgs::msg::Imu(*msg_in));
+
+  const V3D gyr = IMU_R_body * V3D(msg->angular_velocity.x,
+                                   msg->angular_velocity.y,
+                                   msg->angular_velocity.z);
+  const V3D acc = IMU_R_body * V3D(msg->linear_acceleration.x,
+                                   msg->linear_acceleration.y,
+                                   msg->linear_acceleration.z);
+  msg->angular_velocity.x = gyr(0);
+  msg->angular_velocity.y = gyr(1);
+  msg->angular_velocity.z = gyr(2);
+  msg->linear_acceleration.x = acc(0);
+  msg->linear_acceleration.y = acc(1);
+  msg->linear_acceleration.z = acc(2);
 
   msg->header.stamp =
       get_ros_time(get_time_sec(msg_in->header.stamp) - time_diff_lidar_to_imu);
@@ -723,6 +740,7 @@ class LaserMappingNode : public rclcpp::Node {
  public:
   std::string lidar_frame_ =
       "body";  // temp: gets updated on first message received
+  std::string body_frame_;  // common.body_frame, overrides lidar_frame_
 
   LaserMappingNode(const rclcpp::NodeOptions &options = rclcpp::NodeOptions())
       : Node("laser_mapping", options) {
@@ -736,6 +754,9 @@ class LaserMappingNode : public rclcpp::Node {
     this->declare_parameter<string>("map_file_path", "");
     this->declare_parameter<string>("common.lid_topic", "/livox/lidar");
     this->declare_parameter<string>("common.imu_topic", "/livox/imu");
+    // Child frame of /Odometry and of the camera_init TF. Empty: use the
+    // frame_id of the first lidar message
+    this->declare_parameter<string>("common.body_frame", "");
     this->declare_parameter<bool>("common.time_sync_en", false);
     this->declare_parameter<double>("common.time_offset_lidar_to_imu", 0.0);
     this->declare_parameter<double>("filter_size_corner", 0.5);
@@ -763,6 +784,8 @@ class LaserMappingNode : public rclcpp::Node {
                                             vector<double>());
     this->declare_parameter<vector<double>>("mapping.extrinsic_R",
                                             vector<double>());
+    this->declare_parameter<vector<double>>(
+        "mapping.imu_R", vector<double>{1., 0., 0., 0., 1., 0., 0., 0., 1.});
 
     this->get_parameter_or<bool>("publish.path_en", path_en, true);
     this->get_parameter_or<bool>("publish.effect_map_en", effect_pub_en, false);
@@ -777,6 +800,8 @@ class LaserMappingNode : public rclcpp::Node {
     this->get_parameter_or<string>("common.lid_topic", lid_topic,
                                    "/livox/lidar");
     this->get_parameter_or<string>("common.imu_topic", imu_topic, "/livox/imu");
+    this->get_parameter_or<string>("common.body_frame", body_frame_, "");
+    if (!body_frame_.empty()) lidar_frame_ = body_frame_;
     this->get_parameter_or<bool>("common.time_sync_en", time_sync_en, false);
     this->get_parameter_or<double>("common.time_offset_lidar_to_imu",
                                    time_diff_lidar_to_imu, 0.0);
@@ -811,6 +836,8 @@ class LaserMappingNode : public rclcpp::Node {
                                            vector<double>());
     this->get_parameter_or<vector<double>>("mapping.extrinsic_R", extrinR,
                                            vector<double>());
+    this->get_parameter_or<vector<double>>("mapping.imu_R", imuR,
+                                           vector<double>());
 
     RCLCPP_INFO(this->get_logger(), "p_pre->lidar_type %d", p_pre->lidar_type);
 
@@ -839,6 +866,7 @@ class LaserMappingNode : public rclcpp::Node {
 
     Lidar_T_wrt_IMU << VEC_FROM_ARRAY(extrinT);
     Lidar_R_wrt_IMU << MAT_FROM_ARRAY(extrinR);
+    IMU_R_body << MAT_FROM_ARRAY(imuR);
     p_imu->set_extrinsic(Lidar_T_wrt_IMU, Lidar_R_wrt_IMU);
     p_imu->set_gyr_cov(V3D(gyr_cov, gyr_cov, gyr_cov));
     p_imu->set_acc_cov(V3D(acc_cov, acc_cov, acc_cov));
@@ -914,7 +942,7 @@ class LaserMappingNode : public rclcpp::Node {
   ~LaserMappingNode() {
     fout_out.close();
     fout_pre.close();
-    fclose(fp);
+    if (fp) fclose(fp);  // NULL when Log/ does not exist
   }
 
  private:
@@ -930,7 +958,7 @@ class LaserMappingNode : public rclcpp::Node {
     if (is_first_lidar) {
       is_first_lidar = false;
 
-      lidar_frame_ = msg->header.frame_id;
+      if (body_frame_.empty()) lidar_frame_ = msg->header.frame_id;
     }
 
     PointCloudXYZI::Ptr ptr(new PointCloudXYZI());

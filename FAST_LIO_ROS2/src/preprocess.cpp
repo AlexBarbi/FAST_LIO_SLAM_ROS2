@@ -532,6 +532,12 @@ void Preprocess::default_handler(
     added_pt.intensity = pl_orig.points[i].intensity;
     added_pt.curvature = 0.;
 
+    // Organized clouds (e.g. Gazebo gpu_lidar) mark rays without a return
+    // as +-inf, which would pass the blind check below
+    if (!std::isfinite(added_pt.x) || !std::isfinite(added_pt.y) ||
+        !std::isfinite(added_pt.z))
+      continue;
+
     if (added_pt.x * added_pt.x + added_pt.y * added_pt.y +
             added_pt.z * added_pt.z >
         (blind * blind)) {
