@@ -13,6 +13,13 @@ the TARE exploration): its nodes and its trajectory, obstacle-contour and visibi
 graph is drawn as saved, so it lines up only if it was built in the frame of the map, as the
 exploration's graph and map are.
 
+Live view: when rclpy can be imported (ROS 2 sourced, same ROS_DOMAIN_ID as the robot), the page
+also shows where the robot is (FAST-LIO's lio_base), its trail, the path it is following (FAR's
+/viz_path_topic and /way_point, TARE's /exploration_path) and OptiPessi's current plan (the MPC's
+CoM trajectory and its goal). Everything is brought to the frame of the map with TF: global_map
+when fast_lio_localization runs, else camera_init (the exploration, or a FAST-LIO started at the
+spawn). --no-live turns it off.
+
 Needs only numpy: the PCD reader handles ascii, binary and binary_compressed (LZF) files,
 so the system python3 works (open3d is not needed).
 """
@@ -20,10 +27,13 @@ import argparse
 import csv
 import io
 import json
+import math
 import os
 import re
 import struct
 import sys
+import threading
+import time
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
@@ -245,6 +255,143 @@ def read_points(path):
     return [{"x": float(p["x"]), "y": float(p["y"]), "z": float(p.get("z", 0.0))} for p in pts]
 
 
+# ---------------------------------------------------------------- live robot data (ROS 2)
+
+def quat_to_matrix(q):
+    x, y, z, w = q.x, q.y, q.z, q.w
+    return np.array([
+        [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+        [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+        [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)],
+    ])
+
+
+class LiveBridge:
+    """Keeps the latest robot data from ROS 2 and brings it to the frame of the map on request.
+
+    Messages are kept in their own frame, as received, and moved with the latest TF when the page asks
+    (like tare_path_to_opti_pessi_goal.py: planner and controller stamps come from different clocks).
+    OptiPessi publishes in odom, which reaches the map through lio_odom_alignment's odom -> lio_map.
+    """
+    STALE = 5.0  # s without a message before a path or mark is no longer shown
+    ROBOT_STALE = 3.0  # s without /Odometry before the robot is no longer shown
+
+    def __init__(self, map_frame, robot_frame):
+        import rclpy
+        from geometry_msgs.msg import PointStamped
+        from nav_msgs.msg import Odometry, Path
+        from rclpy.executors import SingleThreadedExecutor
+        from rclpy.time import Time
+        from tf2_ros import Buffer, TransformListener
+        from visualization_msgs.msg import Marker, MarkerArray
+
+        self.rclpy = rclpy
+        self.latest_time = Time()  # "latest available" for TF lookups
+        self.map_frame = map_frame  # None: global_map when it exists, else camera_init
+        self.robot_frame = robot_frame
+        self.lock = threading.Lock()
+        self.latest = {}  # key -> (monotonic receive time, frame, (n, 3) array)
+        self.odometry_time = None
+
+        rclpy.init(args=[])
+        self.node = rclpy.create_node("map_point_picker_live")
+        self.tf_buffer = Buffer()
+        self.tf_listener = TransformListener(self.tf_buffer, self.node)
+
+        def keep(key, frame, points):
+            with self.lock:
+                self.latest[key] = (time.monotonic(), frame, np.asarray(points, dtype=float).reshape(-1, 3))
+
+        def xyz(p):
+            return (p.x, p.y, p.z)
+
+        def on_odometry(msg):
+            self.odometry_time = time.monotonic()
+
+        def on_far_path(msg):  # empty once the goal is reached
+            keep("far", msg.header.frame_id, [xyz(p) for p in msg.points])
+
+        def on_tare_path(msg):
+            keep("tare", msg.header.frame_id, [xyz(p.pose.position) for p in msg.poses])
+
+        def on_trajectory(msg):
+            for m in msg.markers:
+                if m.ns == "CoM Trajectory" and m.action == Marker.ADD:
+                    keep("opti", m.header.frame_id, [xyz(p) for p in m.points])
+                    return
+
+        def on_plan(msg):
+            found = {"opti_goal": None, "opti_detour": None}
+            for m in msg.markers:
+                if m.action == Marker.ADD and m.ns == "goal":
+                    found["opti_goal"] = m
+                elif m.action == Marker.ADD and m.ns == "detour_goal" and m.type == Marker.SPHERE:
+                    found["opti_detour"] = m
+            for key, m in found.items():  # absent from the message: no goal / no detour now
+                keep(key, m.header.frame_id if m else "", [xyz(m.pose.position)] if m else [])
+
+        self.node.create_subscription(Odometry, "/Odometry", on_odometry, 5)
+        self.node.create_subscription(Marker, "/viz_path_topic", on_far_path, 5)
+        self.node.create_subscription(PointStamped, "/way_point",
+                                      lambda msg: keep("far_waypoint", msg.header.frame_id, [xyz(msg.point)]), 5)
+        self.node.create_subscription(Path, "/exploration_path", on_tare_path, 5)
+        self.node.create_subscription(MarkerArray, "/opti_pessi/optimizedStateTrajectory", on_trajectory, 1)
+        self.node.create_subscription(MarkerArray, "/opti_pessi/plan", on_plan, 1)
+
+        self.executor = SingleThreadedExecutor()
+        self.executor.add_node(self.node)
+        threading.Thread(target=self.executor.spin, daemon=True).start()
+
+    def shutdown(self):
+        self.executor.shutdown()
+        self.rclpy.try_shutdown()
+
+    def transform(self, target, source):
+        """(R, t) taking points from source to target, with the latest TF."""
+        if not source or source == target:
+            return np.eye(3), np.zeros(3)
+        tf = self.tf_buffer.lookup_transform(target, source, self.latest_time).transform
+        return quat_to_matrix(tf.rotation), np.array([tf.translation.x, tf.translation.y, tf.translation.z])
+
+    def target_frame(self):
+        if self.map_frame:
+            return self.map_frame
+        try:
+            self.transform("global_map", "camera_init")
+            return "global_map"
+        except Exception:
+            return "camera_init"
+
+    def snapshot(self):
+        now = time.monotonic()
+        frame = self.target_frame()
+        out = {"ok": True, "frame": frame, "robot": None, "paths": {}, "marks": {}, "errors": []}
+        if self.odometry_time is None or now - self.odometry_time > self.ROBOT_STALE:
+            out["errors"].append("no /Odometry: FAST-LIO not running (or another ROS_DOMAIN_ID)")
+        else:
+            try:
+                R, t = self.transform(frame, self.robot_frame)
+                out["robot"] = {"x": t[0], "y": t[1], "z": t[2], "yaw": math.atan2(R[1, 0], R[0, 0])}
+            except Exception as e:
+                out["errors"].append("robot: %s" % e)
+        with self.lock:
+            latest = dict(self.latest)
+        for key, (received, source, points) in latest.items():
+            if now - received > self.STALE or len(points) == 0:
+                continue
+            try:
+                R, t = self.transform(frame, source)
+            except Exception as e:
+                out["errors"].append("%s: %s" % (key, e))
+                continue
+            xy = np.round((points @ R.T + t)[:, :2], 3).tolist()
+            if key in ("far", "tare", "opti"):
+                out["paths"][key] = xy
+            else:
+                out["marks"][key] = xy[0]
+        return out
+
+
 # ---------------------------------------------------------------- HTTP server
 
 def make_handler(state):
@@ -289,6 +436,10 @@ def make_handler(state):
                 return self.send(HTTPStatus.OK, dict(state["meta"], graph_files=list_graphs(state["graph_dir"])))
             if url.path == "/api/cloud":
                 return self.send(HTTPStatus.OK, state["cloud"], "application/octet-stream")
+            if url.path == "/api/live":
+                if state["live"] is None:
+                    return self.send(HTTPStatus.OK, {"ok": False, "error": state["meta"]["live_error"]})
+                return self.send(HTTPStatus.OK, state["live"].snapshot())
             if url.path == "/api/graph":
                 name = parse_qs(url.query).get("name", [""])[0]
                 if not NAME_RE.match(name) or not name.endswith(".vgh"):
@@ -352,6 +503,12 @@ def main():
                              "so only open it to a network you trust.")
     parser.add_argument("--max-points", type=int, default=2000000,
                         help="randomly thin larger maps to this many points for the browser (default: 2000000)")
+    parser.add_argument("--no-live", action="store_true", help="do not show the robot live (no ROS 2)")
+    parser.add_argument("--live-frame", default=None,
+                        help="TF frame of the map for the live view (default: global_map when fast_lio_localization "
+                             "publishes it, else camera_init)")
+    parser.add_argument("--robot-frame", default="lio_base",
+                        help="TF frame drawn as the robot (default: lio_base, FAST-LIO's base)")
     args = parser.parse_args()
 
     pcd = os.path.abspath(os.path.expanduser(args.pcd))
@@ -397,11 +554,20 @@ def main():
         "graph_dir": graph_dir,
         "default_graph": default_graph,
     }
+    live, meta["live_error"] = None, "turned off (--no-live)"
+    if not args.no_live:
+        try:
+            live, meta["live_error"] = LiveBridge(args.live_frame, args.robot_frame), None
+        except ImportError as e:
+            meta["live_error"] = "no ROS 2 (%s): source /opt/ros/jazzy/setup.bash and the workspace" % e
+    meta["live"] = live is not None
     # sent as x, y, z, height above the local floor (for the page's "Hide floor")
     cloud = np.column_stack([xyz, height_above_floor(xyz)])
-    state = {"meta": meta, "cloud": np.ascontiguousarray(cloud, dtype="<f4").tobytes(),
+    state = {"meta": meta, "cloud": np.ascontiguousarray(cloud, dtype="<f4").tobytes(), "live": live,
              "out_dir": out_dir, "graph_dir": graph_dir, "local_only": args.host in LOCAL_HOSTS}
     print("%d points (%d in the file), floor at z = %.2f m" % (len(xyz), n_total, meta["floor_z"]))
+    print("live robot view: " + ("on, ROS_DOMAIN_ID=%s" % os.environ.get("ROS_DOMAIN_ID", "0") if live
+                                 else meta["live_error"]))
 
     server = ThreadingHTTPServer((args.host, args.port), make_handler(state))
     print("open http://%s:%d  (points are saved in %s)  Ctrl+C to quit"
@@ -410,6 +576,9 @@ def main():
         server.serve_forever()
     except KeyboardInterrupt:
         pass
+    finally:
+        if live is not None:
+            live.shutdown()
 
 
 if __name__ == "__main__":
