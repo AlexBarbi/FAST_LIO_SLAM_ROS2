@@ -33,6 +33,10 @@ parser.add_argument("--no-floor", action="store_true",
 parser.add_argument("--floor-margin", type=float, default=0.15, help="height above the estimated floor that --no-floor hides, in m (default: 0.15)")
 parser.add_argument("--point-size", type=float, default=1.0,
                     help="viewer point size in pixels, also used by the screenshots saved with P (default: 1, the smallest; Open3D's default is 5)")
+parser.add_argument("--no-vis", action="store_true",
+                    help="save the map without opening the viewer, which blocks until its window is closed (unattended runs)")
+parser.add_argument("--output", default=None,
+                    help="map file to save; a relative path is inside data_dir (default: map_<first>_to_<last>_with_intensity.pcd)")
 args = parser.parse_args()
 
 data_dir = os.path.join(os.path.expanduser(args.data_dir), "")
@@ -42,7 +46,7 @@ node_skip = 1
 num_points_in_a_scan = 150000 # for reservation (save faster) // e.g., use 150000 for 128 ray lidars, 100000 for 64 ray lidars, 30000 for 16 ray lidars, if error occured, use the larger value.
 
 is_live_vis = False # recommend to use false
-is_o3d_vis = True
+is_o3d_vis = not args.no_vis
 intensity_color_max = 200
 
 is_near_removal = args.near > 0
@@ -205,6 +209,8 @@ xyzi.point.positions = o3d.core.Tensor(np_xyz_all.astype(np.float32))
 xyzi.point.intensity = o3d.core.Tensor(np_intensity_all.astype(np.float32))
 
 map_name = data_dir + "map_" + str(scan_idx_range_to_stack[0]) + "_to_" + str(scan_idx_range_to_stack[1]) + "_with_intensity.pcd"
+if args.output is not None:
+    map_name = os.path.join(data_dir, os.path.expanduser(args.output)) # an absolute output replaces data_dir
 o3d.t.io.write_point_cloud(map_name, xyzi, compressed=True) # binary_compressed
 print("intensity map is save (path:", map_name, ")")
 
