@@ -1,0 +1,820 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Map Point Picker</title>
+<style>
+  :root {
+    --bg: #0f1216;
+    --panel: #161b21;
+    --panel-2: #1d232b;
+    --border: #2a323c;
+    --text: #e6e9ed;
+    --muted: #8b95a1;
+    --accent: #4da3ff;
+    --accent-text: #06111f;
+    --danger: #ff7b7b;
+    --ok: #5fd38d;
+    --select: #ff4fd8;
+    --map-bg: #0b0e12;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    display: flex; overflow: hidden;
+    background: var(--bg); color: var(--text);
+    font: 13px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  aside {
+    width: 320px; flex: none; min-height: 0;
+    display: flex; flex-direction: column;
+    background: var(--panel); border-right: 1px solid var(--border);
+  }
+  main { flex: 1; min-width: 0; position: relative; background: var(--map-bg); }
+  canvas#map { position: absolute; inset: 0; width: 100%; height: 100%; display: block; cursor: crosshair; touch-action: none; }
+  canvas#map.panning { cursor: grabbing; }
+  canvas#map.over-point { cursor: move; }
+
+  header { padding: 16px 16px 12px; border-bottom: 1px solid var(--border); }
+  h1 { font-size: 15px; font-weight: 600; margin: 0 0 4px; }
+  .muted { color: var(--muted); }
+  .small { font-size: 12px; }
+  .path { word-break: break-all; }
+  section { padding: 12px 16px; border-bottom: 1px solid var(--border); }
+  h2 { font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); margin: 0 0 10px; display: flex; align-items: center; gap: 8px; }
+  h2 .spacer { flex: 1; }
+
+  .row { display: flex; align-items: center; gap: 10px; margin: 6px 0; }
+  .row label { width: 78px; flex: none; color: var(--muted); white-space: nowrap; }
+  .row input[type=range] { flex: 1; min-width: 0; accent-color: var(--accent); }
+  .row output { width: 58px; flex: none; text-align: right; font-variant-numeric: tabular-nums; }
+  .checks { display: flex; flex-wrap: wrap; gap: 6px 14px; margin-top: 8px; }
+  .checks label { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+  .checks input { accent-color: var(--accent); margin: 0; }
+  .colorbar { height: 8px; border-radius: 4px; margin: 10px 0 2px; }
+  .colorbar-labels { display: flex; justify-content: space-between; font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .swatch { display: inline-block; flex: none; width: 9px; height: 9px; border-radius: 50%; background: var(--c); box-shadow: 0 0 0 1px rgba(0,0,0,.6); }
+  .swatch.line { width: 14px; height: 3px; border-radius: 2px; }
+  .legend { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; margin-top: 8px; }
+  .legend span { display: inline-flex; align-items: center; gap: 5px; }
+  #graphInfo { margin-top: 6px; }
+  #graphSection .checks label:has(input:disabled) { opacity: .45; cursor: default; }
+  select {
+    flex: 1; min-width: 0; font: inherit; color: var(--text); background: var(--bg);
+    border: 1px solid var(--border); border-radius: 6px; padding: 5px 6px;
+  }
+
+  button {
+    font: inherit; color: var(--text); background: var(--panel-2);
+    border: 1px solid var(--border); border-radius: 6px; padding: 5px 10px; cursor: pointer;
+  }
+  button:hover:not(:disabled) { border-color: var(--muted); }
+  button:disabled { opacity: .45; cursor: default; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); font-weight: 600; }
+  button.primary:hover:not(:disabled) { filter: brightness(1.1); }
+  button.link { background: none; border: none; padding: 2px 4px; color: var(--muted); text-transform: none; letter-spacing: 0; font-size: 12px; font-weight: 400; }
+  button.link:hover:not(:disabled) { color: var(--text); }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+  #points { flex: 1; min-height: 80px; display: flex; flex-direction: column; padding-bottom: 0; }
+  #list { list-style: none; margin: 0 -16px; padding: 0; overflow-y: auto; flex: 1; }
+  #list li {
+    display: grid; grid-template-columns: 28px 1fr auto 24px; align-items: center; gap: 6px;
+    padding: 4px 12px 4px 16px; cursor: pointer; font-variant-numeric: tabular-nums;
+    border-left: 2px solid transparent;
+  }
+  #list li:hover { background: var(--panel-2); }
+  #list li.selected { background: var(--panel-2); border-left-color: var(--select); }
+  #list .idx { color: var(--muted); font-weight: 600; }
+  #list .z { color: var(--muted); font-size: 12px; }
+  #list .del { padding: 0; width: 22px; height: 22px; line-height: 1; border-color: transparent; background: none; color: var(--muted); font-size: 16px; }
+  #list .del:hover { color: var(--danger); border-color: transparent; }
+  #list .empty { display: block; color: var(--muted); cursor: default; padding: 8px 16px; }
+  #list .empty:hover { background: none; }
+
+  footer { padding: 12px 16px 16px; border-top: 1px solid var(--border); }
+  .file { display: flex; gap: 6px; }
+  .file input {
+    flex: 1; min-width: 0; font: inherit; color: var(--text); background: var(--bg);
+    border: 1px solid var(--border); border-radius: 6px; padding: 5px 8px;
+  }
+  #save { width: 100%; margin-top: 8px; padding: 8px; }
+  #status { min-height: 18px; margin-top: 8px; font-size: 12px; word-break: break-all; }
+  #status.ok { color: var(--ok); }
+  #status.err { color: var(--danger); }
+  #status.warn { color: #f0c05a; }
+
+  .hud {
+    position: absolute; left: 12px; bottom: 12px; right: 12px; pointer-events: none;
+    display: flex; justify-content: space-between; align-items: flex-end; gap: 12px;
+    font-size: 12px; color: var(--text);
+  }
+  .hud > div { background: rgba(11, 14, 18, .78); border: 1px solid var(--border); border-radius: 6px; padding: 5px 9px; }
+  #cursor { font-variant-numeric: tabular-nums; white-space: pre; }
+  .hints { color: var(--muted); text-align: right; }
+  .hints b { color: var(--text); font-weight: 500; }
+  #loading { position: absolute; inset: 0; display: grid; place-items: center; color: var(--muted); font-size: 14px; }
+
+  @media (max-width: 720px) {
+    body { flex-direction: column-reverse; }
+    aside { width: 100%; height: 48%; border-right: 0; border-top: 1px solid var(--border); overflow-y: auto; }
+    #points { min-height: 160px; }
+    .hints { display: none; }
+  }
+</style>
+</head>
+<body>
+<aside>
+  <header>
+    <h1>Map point picker</h1>
+    <div class="small muted path" id="mapInfo">Loading…</div>
+  </header>
+
+  <section>
+    <h2>View <span class="spacer"></span><button class="link" id="fit" title="Fit map (F)">Fit map</button></h2>
+    <div class="row"><label for="zmin">Height min</label><input type="range" id="zmin" step="0.05"><output id="zminOut"></output></div>
+    <div class="row"><label for="zmax">Height max</label><input type="range" id="zmax" step="0.05"><output id="zmaxOut"></output></div>
+    <div class="colorbar" id="colorbar"></div>
+    <div class="colorbar-labels"><span id="cbMin"></span><span id="cbFloor"></span><span id="cbMax"></span></div>
+    <div class="row"><label for="psize">Point size</label><input type="range" id="psize" min="1" max="5" step="1" value="1"><output id="psizeOut"></output></div>
+    <div class="checks">
+      <label><input type="checkbox" id="hideFloor"> Hide floor</label>
+      <label><input type="checkbox" id="showGrid" checked> Grid</label>
+      <label><input type="checkbox" id="showPath" checked> Connect points</label>
+    </div>
+  </section>
+
+  <section id="graphSection">
+    <h2>FAR graph</h2>
+    <div class="file">
+      <select id="graphFile" aria-label="Graph file"></select>
+      <button id="graphReload" title="Reload the graph file and the list of .vgh files">Reload</button>
+    </div>
+    <div class="small muted" id="graphInfo"></div>
+    <div class="checks">
+      <label><input type="checkbox" id="gNodes" checked> Nodes</label>
+      <label><input type="checkbox" id="gTraj" checked><span class="swatch line" style="--c:#4ade80"></span>Trajectory</label>
+      <label><input type="checkbox" id="gContour" checked><span class="swatch line" style="--c:#ff5c5c"></span>Obstacle contours</label>
+      <label><input type="checkbox" id="gVis" checked><span class="swatch line" style="--c:rgba(255,255,255,.55)"></span>Visibility edges</label>
+    </div>
+    <div class="legend small muted">
+      <span><span class="swatch" style="--c:#ffd84d"></span>trajectory</span>
+      <span><span class="swatch" style="--c:#ff9f40"></span>frontier</span>
+      <span><span class="swatch" style="--c:#7cc4ff"></span>free space</span>
+      <span><span class="swatch" style="--c:#c3cad3"></span>other</span>
+    </div>
+  </section>
+
+  <section id="points">
+    <h2>Points <span id="count">0</span><span class="spacer"></span>
+      <button class="link" id="undo" title="Undo (Ctrl+Z)" disabled>Undo</button>
+      <button class="link" id="clear" disabled>Clear</button>
+    </h2>
+    <ul id="list"></ul>
+  </section>
+
+  <footer>
+    <div class="file">
+      <input type="text" id="name" spellcheck="false" aria-label="Output file name">
+      <button id="load" title="Load the points saved in this file">Load</button>
+    </div>
+    <div class="small muted path" id="outDir"></div>
+    <button class="primary" id="save" title="Save (Ctrl+S)">Save points</button>
+    <div id="status" role="status"></div>
+  </footer>
+</aside>
+
+<main>
+  <canvas id="map"></canvas>
+  <div class="hud">
+    <div id="cursor">x —  y —</div>
+    <div class="hints"><b>Click</b> add · <b>Drag</b> pan · <b>Wheel</b> zoom · <b>Drag point</b> move · <b>Right-click point</b> delete</div>
+  </div>
+  <div id="loading">Loading map…</div>
+</main>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const canvas = $("map");
+const ctx = canvas.getContext("2d");
+
+let meta = null;       // /api/meta
+let P = null;          // Float32Array x, y, z, height above the local floor, x, y, z, ...
+let points = [];       // [{x, y, z}]
+let history = [];      // point-list snapshots for undo
+let selected = -1;
+let dirty = false;
+
+const view = { cx: 0, cy: 0, s: 20 };   // map centre (m) and zoom (CSS px per m)
+let dpr = 1, W = 0, H = 0;               // canvas size in device px
+let hover = null;
+let drag = null;
+let graph = null;      // /api/graph: {nodes, edges: {trajectory, contour, visibility}}
+let graphHover = -1;   // index of the graph node under the cursor
+
+const FLOOR_MARGIN = 0.15;  // "Hide floor" drops points up to this far above the local floor, in m
+const HIT_RADIUS = 10;      // CSS px
+
+// ------------------------------------------------------------ colours
+
+// Turbo colormap, polynomial approximation (Mikhailov, Google 2019).
+function turbo(t) {
+  t = Math.min(1, Math.max(0, t));
+  const r = 0.13572138 + t * (4.61539260 + t * (-42.66032258 + t * (132.13108234 + t * (-152.94239396 + t * 59.28637943))));
+  const g = 0.09140261 + t * (2.19418839 + t * (4.84296658 + t * (-14.18503333 + t * (4.27729857 + t * 2.82956604))));
+  const b = 0.10667330 + t * (12.64194608 + t * (-60.58204836 + t * (110.36276771 + t * (-89.90310912 + t * 27.34824973))));
+  return [r, g, b].map((v) => Math.round(255 * Math.min(1, Math.max(0, v))));
+}
+const LUT = new Uint32Array(256);  // ABGR, as ImageData reads it on little-endian machines
+for (let i = 0; i < 256; i++) {
+  const [r, g, b] = turbo(i / 255);
+  LUT[i] = (255 << 24) | (b << 16) | (g << 8) | r;
+}
+const BG = (255 << 24) | (0x12 << 16) | (0x0e << 8) | 0x0b;  // --map-bg
+$("colorbar").style.background = "linear-gradient(to right," +
+  Array.from({ length: 11 }, (_, i) => "rgb(" + turbo(i / 10).join(",") + ")").join(",") + ")";
+
+// ------------------------------------------------------------ coordinates
+
+const cssW = () => W / dpr, cssH = () => H / dpr;
+function toScreen(x, y) { return [cssW() / 2 + (x - view.cx) * view.s, cssH() / 2 - (y - view.cy) * view.s]; }
+function toWorld(px, py) { return [view.cx + (px - cssW() / 2) / view.s, view.cy - (py - cssH() / 2) / view.s]; }
+function local(e) { const r = canvas.getBoundingClientRect(); return [e.clientX - r.left, e.clientY - r.top]; }
+
+function zRange() {
+  return { lo: +$("zmin").value, hi: +$("zmax").value };
+}
+
+// Ground height under a map position: a low percentile of the nearby points, so a wall or
+// shelf next to the click does not count, and a few noise points below the floor do not either.
+function groundZ(x, y) {
+  for (const r of [0.3, 0.6, 1.0]) {
+    const zs = [], r2 = r * r;
+    for (let i = 0; i < P.length; i += 4) {
+      const dx = P[i] - x;
+      if (dx > r || dx < -r) continue;
+      const dy = P[i + 1] - y;
+      if (dx * dx + dy * dy <= r2) zs.push(P[i + 2]);
+    }
+    if (zs.length >= 5) {
+      zs.sort((a, b) => a - b);
+      return zs[Math.floor(0.1 * (zs.length - 1))];
+    }
+  }
+  return meta.floor_z;
+}
+
+// ------------------------------------------------------------ drawing
+
+const mapLayer = document.createElement("canvas");
+const mapCtx = mapLayer.getContext("2d");
+let zbuf = null, img = null, img32 = null;
+let mapDirty = true, frameQueued = false;
+
+function requestDraw(mapChanged) {
+  if (mapChanged) mapDirty = true;
+  if (!frameQueued) { frameQueued = true; requestAnimationFrame(draw); }
+}
+
+// Top-down render: each pixel shows the highest point that falls in it, coloured by height.
+function renderMap() {
+  const n = W * H;
+  if (!zbuf || zbuf.length !== n) {
+    mapLayer.width = W; mapLayer.height = H;
+    zbuf = new Float32Array(n);
+    img = mapCtx.createImageData(W, H);
+    img32 = new Uint32Array(img.data.buffer);
+  }
+  zbuf.fill(-Infinity);
+  const k = view.s * dpr, ox = W / 2 - view.cx * k, oy = H / 2 + view.cy * k;
+  const { lo, hi } = zRange();
+  const hideFloor = $("hideFloor").checked;
+  const ps = Math.max(1, Math.round(+$("psize").value * dpr)), half = ps >> 1;
+  for (let i = 0, len = P.length; i < len; i += 4) {
+    const z = P[i + 2];
+    if (z < lo || z > hi || (hideFloor && P[i + 3] <= FLOOR_MARGIN)) continue;
+    const fx = ox + P[i] * k, fy = oy - P[i + 1] * k;
+    if (ps === 1) {
+      if (fx < 0 || fy < 0 || fx >= W || fy >= H) continue;
+      const j = (fy | 0) * W + (fx | 0);
+      if (z > zbuf[j]) zbuf[j] = z;
+    } else {
+      const x0 = Math.max(0, Math.floor(fx) - half), x1 = Math.min(W, Math.floor(fx) - half + ps);
+      const y0 = Math.max(0, Math.floor(fy) - half), y1 = Math.min(H, Math.floor(fy) - half + ps);
+      for (let py = y0; py < y1; py++) {
+        for (let px = x0, j = py * W + x0; px < x1; px++, j++) if (z > zbuf[j]) zbuf[j] = z;
+      }
+    }
+  }
+  const scale = 255 / Math.max(1e-6, hi - lo);
+  for (let j = 0; j < n; j++) {
+    const z = zbuf[j];
+    img32[j] = z === -Infinity ? BG : LUT[Math.min(255, ((z - lo) * scale) | 0)];
+  }
+  mapCtx.putImageData(img, 0, 0);
+  mapDirty = false;
+}
+
+function gridStep() {
+  for (const st of [0.1, 0.2, 0.5, 1, 2, 5, 10, 20, 50, 100, 200]) if (st * view.s >= 48) return st;
+  return 500;
+}
+
+function drawGrid() {
+  const st = gridStep(), w = cssW(), h = cssH();
+  const [x0, y1] = toWorld(0, 0), [x1, y0] = toWorld(w, h);
+  const dec = st < 1 ? 1 : 0;
+  ctx.lineWidth = 1;
+  ctx.strokeStyle = "rgba(255,255,255,0.08)";
+  ctx.beginPath();
+  for (let i = Math.ceil(x0 / st); i * st <= x1; i++) { const px = Math.round(toScreen(i * st, 0)[0]) + 0.5; ctx.moveTo(px, 0); ctx.lineTo(px, h); }
+  for (let i = Math.ceil(y0 / st); i * st <= y1; i++) { const py = Math.round(toScreen(0, i * st)[1]) + 0.5; ctx.moveTo(0, py); ctx.lineTo(w, py); }
+  ctx.stroke();
+  ctx.fillStyle = "rgba(230,233,237,0.5)";
+  ctx.font = "10px system-ui, sans-serif";
+  ctx.textBaseline = "top"; ctx.textAlign = "left";
+  for (let i = Math.ceil(x0 / st); i * st <= x1; i++) ctx.fillText((i * st).toFixed(dec), toScreen(i * st, 0)[0] + 3, 4);
+  ctx.textBaseline = "bottom";
+  for (let i = Math.ceil(y0 / st); i * st <= y1; i++) {
+    const py = toScreen(0, i * st)[1];
+    if (py > 30) ctx.fillText((i * st).toFixed(dec), 4, py - 2);  // keep clear of the x labels
+  }
+}
+
+function arrow(x0, y0, x1, y1, color) {
+  const a = Math.atan2(y1 - y0, x1 - x0);
+  ctx.strokeStyle = ctx.fillStyle = color;
+  ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(x1 + 2 * Math.cos(a), y1 + 2 * Math.sin(a));
+  ctx.lineTo(x1 - 7 * Math.cos(a - 0.45), y1 - 7 * Math.sin(a - 0.45));
+  ctx.lineTo(x1 - 7 * Math.cos(a + 0.45), y1 - 7 * Math.sin(a + 0.45));
+  ctx.fill();
+}
+
+// Map origin (for SC-PGO, where the first keyframe was) with its x (red) and y (green) axes.
+function drawOrigin() {
+  const [ox, oy] = toScreen(0, 0), L = 30;
+  ctx.save();
+  ctx.shadowColor = "rgba(0,0,0,0.8)"; ctx.shadowBlur = 3;
+  arrow(ox, oy, ox + L, oy, "#ff5a5a");
+  arrow(ox, oy, ox, oy - L, "#56d364");
+  ctx.fillStyle = "#e6e9ed"; ctx.font = "11px system-ui, sans-serif";
+  ctx.textAlign = "left"; ctx.textBaseline = "top";
+  ctx.fillText("origin", ox + 4, oy + 4);
+  ctx.restore();
+}
+
+// FAR graph, coloured like graph_decoder's RViz markers
+const NODE_COLORS = { trajectory: "#ffd84d", frontier: "#ff9f40", covered: "#7cc4ff", other: "#c3cad3" };
+const NODE_NAMES = { trajectory: "trajectory", frontier: "frontier", covered: "free space", other: "other" };
+const FREE_TYPES = ["unknown", "convex", "concave", "pillar"];
+const nodeKind = (n) => n.navpoint ? "trajectory" : n.frontier ? "frontier" : n.covered ? "covered" : "other";
+
+function strokeEdges(pairs, S, color, width, halo) {
+  if (!pairs.length) return;
+  ctx.beginPath();
+  for (const [i, j] of pairs) { ctx.moveTo(S[i][0], S[i][1]); ctx.lineTo(S[j][0], S[j][1]); }
+  if (halo) { ctx.lineWidth = width + 3; ctx.strokeStyle = "rgba(0,0,0,0.6)"; ctx.stroke(); }
+  ctx.lineWidth = width; ctx.strokeStyle = color; ctx.stroke();
+}
+
+function drawGraph() {
+  if (!graph) return;
+  const S = graph.nodes.map((n) => toScreen(n.x, n.y));
+  ctx.save();
+  ctx.lineCap = "round";
+  if ($("gVis").checked) strokeEdges(graph.edges.visibility, S, "rgba(255,255,255,0.28)", 1, false);
+  if ($("gContour").checked) strokeEdges(graph.edges.contour, S, "#ff5c5c", 2, true);
+  if ($("gTraj").checked) strokeEdges(graph.edges.trajectory, S, "#4ade80", 2.5, true);
+  if ($("gNodes").checked) {
+    ctx.lineWidth = 1.5;
+    ctx.strokeStyle = "rgba(0,0,0,0.75)";
+    graph.nodes.forEach((n, i) => {
+      ctx.beginPath(); ctx.arc(S[i][0], S[i][1], i === graphHover ? 5.5 : 3.5, 0, 2 * Math.PI);
+      ctx.fillStyle = NODE_COLORS[nodeKind(n)]; ctx.fill(); ctx.stroke();
+    });
+  }
+  ctx.restore();
+}
+
+function graphHitTest(mx, my) {
+  if (!graph || !$("gNodes").checked) return -1;
+  let best = -1, bestD = 8;
+  graph.nodes.forEach((n, i) => {
+    const [sx, sy] = toScreen(n.x, n.y), d = Math.hypot(sx - mx, sy - my);
+    if (d <= bestD) { best = i; bestD = d; }
+  });
+  return best;
+}
+
+function drawPoints() {
+  if ($("showPath").checked && points.length > 1) {
+    ctx.save();
+    ctx.setLineDash([6, 5]);
+    ctx.lineWidth = 1.5;
+    ctx.strokeStyle = "rgba(255,255,255,0.7)";
+    ctx.beginPath();
+    points.forEach((p, i) => { const [sx, sy] = toScreen(p.x, p.y); i ? ctx.lineTo(sx, sy) : ctx.moveTo(sx, sy); });
+    ctx.stroke();
+    ctx.restore();
+  }
+  ctx.font = "600 11px system-ui, sans-serif";
+  ctx.textBaseline = "middle"; ctx.textAlign = "center";
+  points.forEach((p, i) => {
+    const [sx, sy] = toScreen(p.x, p.y), sel = i === selected, color = sel ? "#ff4fd8" : "#ffffff";
+    // hollow ring so the map under the point stays visible, dark outline for contrast
+    ctx.beginPath(); ctx.arc(sx, sy, 7, 0, 2 * Math.PI);
+    ctx.lineWidth = 5; ctx.strokeStyle = "rgba(0,0,0,0.75)"; ctx.stroke();
+    ctx.lineWidth = 2.5; ctx.strokeStyle = color; ctx.stroke();
+    ctx.beginPath(); ctx.arc(sx, sy, 1.8, 0, 2 * Math.PI); ctx.fillStyle = color; ctx.fill();
+    // number tag
+    const label = String(i + 1), tw = Math.max(16, ctx.measureText(label).width + 8), tx = sx + 10, ty = sy - 16;
+    ctx.fillStyle = color;
+    ctx.beginPath(); ctx.roundRect(tx, ty - 8, tw, 16, 8); ctx.fill();
+    ctx.fillStyle = sel ? "#ffffff" : "#0b0e12";
+    ctx.fillText(label, tx + tw / 2, ty + 0.5);
+  });
+}
+
+function draw() {
+  frameQueued = false;
+  if (!P || !W || !H) return;
+  if (mapDirty) renderMap();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.drawImage(mapLayer, 0, 0);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  if ($("showGrid").checked) drawGrid();
+  drawGraph();
+  drawOrigin();
+  drawPoints();
+  updateCursor();
+}
+
+function updateCursor() {
+  const g = gridStep();
+  const pos = hover ? "x " + fmt(hover[0], 3) + "  y " + fmt(hover[1], 3) + " m" : "x —  y —";
+  let text = pos + "    grid " + g + " m";
+  if (graph && graphHover >= 0) {
+    const n = graph.nodes[graphHover];
+    text += "    node " + n.id + " · " + NODE_NAMES[nodeKind(n)] + " · " + FREE_TYPES[n.type] + " · z " + fmt(n.z);
+  }
+  $("cursor").textContent = text;
+}
+
+function fit() {
+  const [x0, y0] = meta.min, [x1, y1] = meta.max;
+  view.cx = (x0 + x1) / 2;
+  view.cy = (y0 + y1) / 2;
+  view.s = 0.92 * Math.min(cssW() / Math.max(0.1, x1 - x0), cssH() / Math.max(0.1, y1 - y0));
+  requestDraw(true);
+}
+
+function resize() {
+  dpr = window.devicePixelRatio || 1;
+  const r = canvas.getBoundingClientRect();
+  W = Math.max(1, Math.round(r.width * dpr));
+  H = Math.max(1, Math.round(r.height * dpr));
+  canvas.width = W; canvas.height = H;
+  requestDraw(true);
+}
+
+// ------------------------------------------------------------ point list
+
+const fmt = (v, d = 2) => (v < 0 ? "−" : "") + Math.abs(v).toFixed(d);
+const snapshot = () => points.map((p) => ({ ...p }));
+
+function pushHistory(snap = snapshot()) {
+  history.push(snap);
+  if (history.length > 200) history.shift();
+}
+
+function changed() {
+  dirty = true;
+  setStatus("Unsaved changes", "warn");
+  renderList();
+  requestDraw();
+}
+
+function addPoint(x, y) {
+  pushHistory();
+  points.push({ x, y, z: groundZ(x, y) });
+  selected = points.length - 1;
+  changed();
+}
+
+function deletePoint(i) {
+  pushHistory();
+  points.splice(i, 1);
+  if (selected === i) selected = -1; else if (selected > i) selected--;
+  changed();
+}
+
+function undo() {
+  if (!history.length) return;
+  points = history.pop();
+  selected = -1;
+  changed();
+}
+
+function clearAll() {
+  if (!points.length) return;
+  pushHistory();
+  points = [];
+  selected = -1;
+  changed();
+}
+
+function select(i, center) {
+  selected = i;
+  if (center && i >= 0) {
+    const [sx, sy] = toScreen(points[i].x, points[i].y);
+    if (sx < 40 || sy < 40 || sx > cssW() - 40 || sy > cssH() - 40) {
+      view.cx = points[i].x; view.cy = points[i].y;
+      requestDraw(true);
+    }
+  }
+  renderList();
+  requestDraw();
+}
+
+function renderList() {
+  const list = $("list");
+  list.replaceChildren();
+  $("count").textContent = points.length;
+  $("undo").disabled = !history.length;
+  $("clear").disabled = !points.length;
+  if (!points.length) {
+    const li = document.createElement("li");
+    li.className = "empty";
+    li.textContent = "Click the map to add a point.";
+    list.append(li);
+    return;
+  }
+  points.forEach((p, i) => {
+    const li = document.createElement("li");
+    if (i === selected) li.className = "selected";
+    const idx = document.createElement("span"); idx.className = "idx"; idx.textContent = i + 1;
+    const xy = document.createElement("span"); xy.textContent = "x " + fmt(p.x) + "   y " + fmt(p.y);
+    const z = document.createElement("span"); z.className = "z"; z.textContent = "z " + fmt(p.z);
+    z.title = "ground height under the point";
+    const del = document.createElement("button"); del.className = "del"; del.textContent = "×";
+    del.title = "Delete point " + (i + 1); del.setAttribute("aria-label", del.title);
+    del.addEventListener("click", (e) => { e.stopPropagation(); deletePoint(i); });
+    li.append(idx, xy, z, del);
+    li.addEventListener("click", () => select(i, true));
+    list.append(li);
+  });
+  if (selected >= 0) list.children[selected].scrollIntoView({ block: "nearest" });
+}
+
+// ------------------------------------------------------------ saving
+
+function setStatus(text, kind) {
+  const el = $("status");
+  el.textContent = text;
+  el.className = kind || "";
+}
+
+async function save() {
+  const name = $("name").value.trim();
+  setStatus("Saving…");
+  try {
+    const r = await fetch("/api/points", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name, points }),
+    });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || r.statusText);
+    dirty = false;
+    setStatus("Saved " + j.count + " point" + (j.count === 1 ? "" : "s") + " to " + j.path, "ok");
+  } catch (e) {
+    setStatus("Save failed: " + e.message, "err");
+  }
+}
+
+async function load(name, quiet) {
+  if (dirty && !quiet && !confirm("Discard the unsaved changes?")) return;
+  try {
+    const r = await fetch("/api/points?name=" + encodeURIComponent(name));
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || r.statusText);
+    if (!j.exists) {
+      if (!quiet) setStatus(j.path + " does not exist yet", "warn");
+      return;
+    }
+    if (points.length) pushHistory();
+    points = j.points;
+    selected = -1;
+    dirty = false;
+    renderList();
+    requestDraw();
+    setStatus("Loaded " + points.length + " point" + (points.length === 1 ? "" : "s") + " from " + j.path, "ok");
+  } catch (e) {
+    setStatus("Load failed: " + e.message, "err");
+  }
+}
+
+async function loadGraph(name) {
+  try {
+    const r = await fetch("/api/graph?name=" + encodeURIComponent(name));
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || r.statusText);
+    graph = j;
+    const e = j.edges;
+    $("graphInfo").textContent = j.nodes.length + " nodes · " + e.trajectory.length + " trajectory, " +
+      e.contour.length + " contour, " + e.visibility.length + " visibility edges";
+    $("graphInfo").title = j.path;
+  } catch (err) {
+    graph = null;
+    $("graphInfo").textContent = "Could not load the graph: " + err.message;
+  }
+  graphHover = -1;
+  for (const id of ["gNodes", "gTraj", "gContour", "gVis"]) $(id).disabled = !graph;
+  requestDraw();
+}
+
+// Lists the .vgh files again (a finished exploration rewrites them) and loads the selected one.
+async function refreshGraphs(keepSelection) {
+  const sel = $("graphFile"), previous = sel.value;
+  try {
+    const m = await (await fetch("/api/meta")).json();
+    sel.replaceChildren(...m.graph_files.map((f) => new Option(f, f)));
+    sel.disabled = !m.graph_files.length;
+    if (!m.graph_files.length) {
+      graph = null;
+      $("graphInfo").textContent = "No .vgh file in " + m.graph_dir;
+      for (const id of ["gNodes", "gTraj", "gContour", "gVis"]) $(id).disabled = true;
+      requestDraw();
+      return;
+    }
+    const want = keepSelection && previous ? previous : m.default_graph;
+    sel.value = m.graph_files.includes(want) ? want : m.graph_files[0];
+    await loadGraph(sel.value);
+  } catch (err) {
+    $("graphInfo").textContent = "Could not list the graphs: " + err.message;
+  }
+}
+
+// ------------------------------------------------------------ input
+
+function hitTest(mx, my) {
+  for (let i = points.length - 1; i >= 0; i--) {
+    const [sx, sy] = toScreen(points[i].x, points[i].y);
+    if (Math.hypot(sx - mx, sy - my) <= HIT_RADIUS) return i;
+  }
+  return -1;
+}
+
+canvas.addEventListener("pointerdown", (e) => {
+  if (!P || (e.button !== 0 && e.button !== 1)) return;
+  canvas.setPointerCapture(e.pointerId);
+  const [mx, my] = local(e);
+  const idx = e.button === 0 ? hitTest(mx, my) : -1;
+  drag = { x0: mx, y0: my, cx0: view.cx, cy0: view.cy, idx, button: e.button, moved: false, snap: snapshot() };
+  if (idx >= 0) select(idx, false);
+});
+
+canvas.addEventListener("pointermove", (e) => {
+  if (!P) return;
+  const [mx, my] = local(e);
+  hover = toWorld(mx, my);
+  if (drag) {
+    if (!drag.moved && Math.hypot(mx - drag.x0, my - drag.y0) > 4) {
+      drag.moved = true;
+      if (drag.idx >= 0) pushHistory(drag.snap);
+      else canvas.classList.add("panning");
+    }
+    if (drag.moved) {
+      if (drag.idx >= 0) {
+        points[drag.idx].x = hover[0];
+        points[drag.idx].y = hover[1];
+        requestDraw();
+      } else {
+        view.cx = drag.cx0 - (mx - drag.x0) / view.s;
+        view.cy = drag.cy0 + (my - drag.y0) / view.s;
+        requestDraw(true);
+      }
+      return;
+    }
+  }
+  canvas.classList.toggle("over-point", hitTest(mx, my) >= 0);
+  graphHover = graphHitTest(mx, my);
+  requestDraw();
+});
+
+canvas.addEventListener("pointerup", (e) => {
+  if (!drag) return;
+  const d = drag;
+  drag = null;
+  canvas.classList.remove("panning");
+  if (d.idx >= 0 && d.moved) {
+    const p = points[d.idx];
+    p.z = groundZ(p.x, p.y);
+    changed();
+  } else if (d.idx < 0 && !d.moved && d.button === 0) {
+    const [mx, my] = local(e);
+    addPoint(...toWorld(mx, my));
+  }
+});
+
+canvas.addEventListener("pointercancel", () => { drag = null; canvas.classList.remove("panning"); });
+canvas.addEventListener("pointerleave", () => { if (!drag) { hover = null; graphHover = -1; requestDraw(); } });
+
+canvas.addEventListener("contextmenu", (e) => {
+  e.preventDefault();
+  const i = hitTest(...local(e));
+  if (i >= 0) deletePoint(i);
+});
+
+canvas.addEventListener("wheel", (e) => {
+  if (!P) return;
+  e.preventDefault();
+  const [mx, my] = local(e);
+  const [wx, wy] = toWorld(mx, my);
+  const dy = e.deltaMode === 1 ? e.deltaY * 16 : e.deltaY;
+  view.s = Math.min(3000, Math.max(0.2, view.s * Math.exp(-dy * 0.0015)));
+  view.cx = wx - (mx - cssW() / 2) / view.s;
+  view.cy = wy + (my - cssH() / 2) / view.s;
+  requestDraw(true);
+}, { passive: false });
+
+window.addEventListener("keydown", (e) => {
+  const mod = e.ctrlKey || e.metaKey, key = e.key.toLowerCase();
+  if (mod && key === "s") { e.preventDefault(); save(); return; }
+  if (e.target.matches("input[type=text]")) return;
+  if (mod && key === "z") { e.preventDefault(); undo(); }
+  else if ((e.key === "Delete" || e.key === "Backspace") && selected >= 0) { e.preventDefault(); deletePoint(selected); }
+  else if (e.key === "Escape") select(-1);
+  else if (key === "f" && !mod && meta) fit();
+});
+
+window.addEventListener("beforeunload", (e) => { if (dirty) { e.preventDefault(); e.returnValue = ""; } });
+
+function syncHeights(changedId) {
+  const zmin = $("zmin"), zmax = $("zmax");
+  if (+zmin.value > +zmax.value - 0.05) {
+    if (changedId === "zmin") zmax.value = +zmin.value + 0.05; else zmin.value = +zmax.value - 0.05;
+  }
+  $("zminOut").textContent = fmt(+zmin.value) + " m";
+  $("zmaxOut").textContent = fmt(+zmax.value) + " m";
+  $("cbMin").textContent = fmt(+zmin.value) + " m";
+  $("cbMax").textContent = fmt(+zmax.value) + " m";
+  requestDraw(true);
+}
+$("zmin").addEventListener("input", () => syncHeights("zmin"));
+$("zmax").addEventListener("input", () => syncHeights("zmax"));
+$("psize").addEventListener("input", () => { $("psizeOut").textContent = $("psize").value + " px"; requestDraw(true); });
+$("hideFloor").addEventListener("change", () => requestDraw(true));
+$("showGrid").addEventListener("change", () => requestDraw());
+$("showPath").addEventListener("change", () => requestDraw());
+$("fit").addEventListener("click", () => meta && fit());
+$("undo").addEventListener("click", undo);
+$("clear").addEventListener("click", clearAll);
+$("save").addEventListener("click", save);
+$("load").addEventListener("click", () => load($("name").value.trim(), false));
+$("name").addEventListener("keydown", (e) => { if (e.key === "Enter") save(); });
+$("graphFile").addEventListener("change", () => loadGraph($("graphFile").value));
+$("graphReload").addEventListener("click", () => refreshGraphs(true));
+for (const id of ["gNodes", "gTraj", "gContour", "gVis"]) $(id).addEventListener("change", () => requestDraw());
+new ResizeObserver(resize).observe(canvas);
+
+// ------------------------------------------------------------ start
+
+async function init() {
+  try {
+    meta = await (await fetch("/api/meta")).json();
+    const base = meta.pcd.split("/").pop();
+    $("mapInfo").textContent = base + " · " + meta.n_points.toLocaleString() + " points" +
+      (meta.n_total > meta.n_points ? " (of " + meta.n_total.toLocaleString() + ")" : "");
+    $("mapInfo").title = meta.pcd;
+    $("name").value = meta.default_name;
+    $("outDir").textContent = "in " + meta.out_dir;
+
+    const zlo = Math.floor(meta.min[2] * 20) / 20, zhi = Math.ceil(meta.max[2] * 20) / 20;
+    for (const id of ["zmin", "zmax"]) { $(id).min = zlo; $(id).max = zhi; }
+    $("zmin").value = Math.max(zlo, meta.floor_z - 0.25);
+    $("zmax").value = meta.z_p995;
+    $("cbFloor").textContent = "floor " + fmt(meta.floor_z) + " m";
+    $("psizeOut").textContent = $("psize").value + " px";
+
+    const buf = await (await fetch("/api/cloud")).arrayBuffer();
+    P = new Float32Array(buf);
+    $("loading").remove();
+    resize();
+    syncHeights("zmax");
+    fit();
+    renderList();
+    await Promise.all([load(meta.default_name, true), refreshGraphs(false)]);
+  } catch (e) {
+    $("loading").textContent = "Could not load the map: " + e.message;
+  }
+}
+init();
+</script>
+</body>
+</html>
