@@ -522,6 +522,9 @@ void Preprocess::default_handler(
   pl_surf.reserve(plsize);
 
   for (uint i = 0; i < plsize; ++i) {
+    // In an organized cloud whose width is a multiple of point_filter_num
+    // this keeps every point_filter_num-th column of every ring
+    if (i % point_filter_num != 0) continue;
     PointType added_pt;
     added_pt.normal_x = 0;
     added_pt.normal_y = 0;

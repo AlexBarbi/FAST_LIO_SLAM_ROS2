@@ -754,6 +754,10 @@ class LaserMappingNode : public rclcpp::Node {
     this->declare_parameter<string>("map_file_path", "");
     this->declare_parameter<string>("common.lid_topic", "/livox/lidar");
     this->declare_parameter<string>("common.imu_topic", "/livox/imu");
+    // Reliable PointCloud2 subscription, for drivers that publish reliable and
+    // clouds of several MB (e.g. RoboSense Airy, 900 x 96 points): best effort
+    // loses many of those to fragment drops. false: sensor data QoS
+    this->declare_parameter<bool>("common.lid_reliable", false);
     // Child frame of /Odometry and of the camera_init TF. Empty: use the
     // frame_id of the first lidar message
     this->declare_parameter<string>("common.body_frame", "");
@@ -800,6 +804,8 @@ class LaserMappingNode : public rclcpp::Node {
     this->get_parameter_or<string>("common.lid_topic", lid_topic,
                                    "/livox/lidar");
     this->get_parameter_or<string>("common.imu_topic", imu_topic, "/livox/imu");
+    bool lid_reliable = false;
+    this->get_parameter_or<bool>("common.lid_reliable", lid_reliable, false);
     this->get_parameter_or<string>("common.body_frame", body_frame_, "");
     if (!body_frame_.empty()) lidar_frame_ = body_frame_;
     this->get_parameter_or<bool>("common.time_sync_en", time_sync_en, false);
@@ -897,8 +903,11 @@ class LaserMappingNode : public rclcpp::Node {
           this->create_subscription<livox_ros_driver2::msg::CustomMsg>(
               lid_topic, 20, livox_pcl_cbk);
     } else {
+      const rclcpp::QoS lid_qos = lid_reliable
+                                      ? rclcpp::QoS(10)
+                                      : rclcpp::QoS(rclcpp::SensorDataQoS());
       sub_pcl_pc_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
-          lid_topic, rclcpp::SensorDataQoS(),
+          lid_topic, lid_qos,
           std::bind(&LaserMappingNode::standard_pcl_cbk, this,
                     std::placeholders::_1));
     }
