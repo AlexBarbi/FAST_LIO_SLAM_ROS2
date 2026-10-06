@@ -14,6 +14,8 @@
        description="With detector:=fake: its script (default: the two actors of the Gazebo warehouse)"/>
   <arg name="centerpoint_model" default="$(env HOME)/RaNAV/models/lidar_centerpoint/v4.1/short_range"
        description="With detector:=centerpoint: folder of the model"/>
+  <arg name="opti_pessi_obstacles" default="true"
+       description="With people:=true: the tracked people go to OptiPessiController on /opti_pessi/obstacles. false when another node publishes that topic (yolo26_rgbd_detect)"/>
   <arg name="save_directory" default="$(env HOME)/.ros/sc_pgo/" description="SC-PGO poses and keyframes; its Scans/ subfolder is wiped on start"/>
 
   <node pkg="fast_lio" exec="fastlio_mapping" name="laser_mapping" output="screen">
@@ -44,12 +46,14 @@
        /cloud_registered -> /registered_scan_static for TARE (tare_planner/config/aliengo.yaml). Without it neither
        gets scans. people:=false: unchanged. people:=true: without the tracked people (cloud adapter, detector and
        tracker run too; detector:=fake knows from people_script where the two actors of the Gazebo warehouse walk,
-       detector:=centerpoint finds people in the points, see that launch). -->
+       detector:=centerpoint finds people in the points, see that launch), and the tracked people are the obstacles
+       of OptiPessiController (/opti_pessi/obstacles) unless opti_pessi_obstacles:=false. -->
   <include file="$(find-pkg-share people_perception)/launch/people_perception_launch.xml">
     <arg name="people" value="$(var people)"/>
     <arg name="detector" value="$(var detector)"/>
     <arg name="people_script" value="$(var people_script)"/>
     <arg name="centerpoint_model" value="$(var centerpoint_model)"/>
+    <arg name="opti_pessi_obstacles" value="$(var opti_pessi_obstacles)"/>
     <arg name="use_sim_time" value="$(var use_sim_time)"/>
   </include>
 
