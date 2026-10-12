@@ -8,7 +8,7 @@
   <arg name="use_sim_time" default="true"/>
   <arg name="rviz" default="true"/>
   <arg name="pgo" default="true" description="Run SC-PGO loop closure (needs sc_pgo_ros2 built)"/>
-  <arg name="people" default="false" description="Detect and track people and keep them out of the SC-PGO and TARE scans (people_perception; autoware_lidar_centerpoint finds them in the points: needs CUDA and TensorRT)"/>
+  <arg name="people" default="true" description="Detect and track people and keep them out of the SC-PGO and TARE scans (people_perception; autoware_lidar_centerpoint finds them in the points: needs CUDA and TensorRT)"/>
   <arg name="centerpoint_model" default="$(env HOME)/RaNAV/models/lidar_centerpoint/v4.1/short_range"
        description="With people:=true: folder of the CenterPoint model"/>
   <arg name="opti_pessi_obstacles" default="true"
@@ -40,8 +40,8 @@
 
   <!-- people_perception (docs/perception_pipeline.md). Its dynamic_points_filter republishes the FAST-LIO scans for
        what accumulates them: /cloud_registered_body -> /cloud_registered_body_static for SC-PGO above,
-       /cloud_registered -> /registered_scan_static for TARE (tare_planner/config/aliengo.yaml) and for the FAR graph
-       built while exploring (explore_warehouse_launch.xml). Without it none of them gets scans. people:=false: unchanged. people:=true: without the tracked people (cloud adapter,
+       /cloud_registered -> /registered_scan_static for TARE (tare_planner/config/aliengo.yaml) and for the terrain
+       maps of far_planner (explore_warehouse_launch.xml, far_planner_launch.xml). Without it none of them gets scans. people:=false: unchanged. people:=true: without the tracked people (cloud adapter,
        autoware_lidar_centerpoint and tracker run too, see that launch), and the tracked people are the obstacles
        of OptiPessiController (/opti_pessi/obstacles) unless opti_pessi_obstacles:=false. -->
   <include file="$(find-pkg-share people_perception)/launch/people_perception_launch.xml">
