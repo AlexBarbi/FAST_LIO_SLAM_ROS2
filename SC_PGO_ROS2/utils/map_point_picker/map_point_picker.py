@@ -20,6 +20,10 @@ CoM trajectory and its goal). Everything is brought to the frame of the map with
 when fast_lio_localization runs, else camera_init (the exploration, or a FAST-LIO started at the
 spawn). --no-live turns it off.
 
+Start inspection (needs the live view): saves the points like Save, then sends their file on
+/start_inspection (std_msgs/String) to legged_controllers far_inspection_goals.py, which
+far_planner_launch.xml runs and which sends the robot to the points, in order, only then.
+
 Needs only numpy: the PCD reader handles ascii, binary and binary_compressed (LZF) files,
 so the system python3 works (open3d is not needed).
 """
@@ -282,6 +286,7 @@ class LiveBridge:
         from nav_msgs.msg import Odometry, Path
         from rclpy.executors import SingleThreadedExecutor
         from rclpy.time import Time
+        from std_msgs.msg import String
         from tf2_ros import Buffer, TransformListener
         from visualization_msgs.msg import Marker, MarkerArray
 
@@ -337,6 +342,8 @@ class LiveBridge:
         self.node.create_subscription(Path, "/exploration_path", on_tare_path, 5)
         self.node.create_subscription(MarkerArray, "/opti_pessi/optimizedStateTrajectory", on_trajectory, 1)
         self.node.create_subscription(MarkerArray, "/opti_pessi/plan", on_plan, 1)
+        self.String = String
+        self.start_pub = self.node.create_publisher(String, "/start_inspection", 5)
 
         self.executor = SingleThreadedExecutor()
         self.executor.add_node(self.node)
@@ -345,6 +352,14 @@ class LiveBridge:
     def shutdown(self):
         self.executor.shutdown()
         self.rclpy.try_shutdown()
+
+    def start_inspection(self, path):
+        """Tells far_inspection_goals.py to inspect the points of the file path. None, or why it was not told."""
+        if self.start_pub.get_subscription_count() == 0:
+            return ("nobody listens on /start_inspection: start far_planner_launch.xml first "
+                    "(same ROS_DOMAIN_ID as this server)")
+        self.start_pub.publish(self.String(data=path))
+        return None
 
     def transform(self, target, source):
         """(R, t) taking points from source to target, with the latest TF."""
@@ -469,7 +484,9 @@ def make_handler(state):
                 return self.send(HTTPStatus.FORBIDDEN, {"error": "bad Host header"})
             # A JSON content type forces a CORS preflight, which this server never answers, so
             # other web pages open in the browser cannot write files through it.
-            if urlparse(self.path).path != "/api/points" or \
+            # /api/points saves the points; /api/inspection saves them and starts their inspection.
+            api = urlparse(self.path).path
+            if api not in ("/api/points", "/api/inspection") or \
                     not (self.headers.get("Content-Type") or "").startswith("application/json"):
                 return self.send(HTTPStatus.NOT_FOUND, {"error": "not found"})
             try:
@@ -477,10 +494,19 @@ def make_handler(state):
                 path = self.points_path(body.get("name"))
                 if path is None:
                     return self.send(HTTPStatus.BAD_REQUEST, {"error": "file name must be a plain name ending in " + ", ".join(FORMATS)})
+                if api == "/api/inspection" and not body["points"]:
+                    return self.send(HTTPStatus.BAD_REQUEST, {"error": "no points to inspect"})
                 write_points(path, body["points"], state["meta"]["pcd"])
             except Exception as e:
                 return self.send(HTTPStatus.BAD_REQUEST, {"error": str(e)})
             print("saved %d points to %s" % (len(body["points"]), path), flush=True)
+            if api == "/api/inspection":
+                live = state["live"]
+                error = "no ROS 2: " + state["meta"]["live_error"] if live is None else live.start_inspection(path)
+                if error:
+                    return self.send(HTTPStatus.SERVICE_UNAVAILABLE,
+                                     {"error": "%s. The points are saved in %s" % (error, path)})
+                print("inspection of %s started" % path, flush=True)
             self.send(HTTPStatus.OK, {"path": path, "count": len(body["points"])})
 
     return Handler

@@ -105,7 +105,7 @@
     flex: 1; min-width: 0; font: inherit; color: var(--text); background: var(--bg);
     border: 1px solid var(--border); border-radius: 6px; padding: 5px 8px;
   }
-  #save { width: 100%; margin-top: 8px; padding: 8px; }
+  #save, #inspect { width: 100%; margin-top: 8px; padding: 8px; }
   #status { min-height: 18px; margin-top: 8px; font-size: 12px; word-break: break-all; }
   #status.ok { color: var(--ok); }
   #status.err { color: var(--danger); }
@@ -203,6 +203,7 @@
     </div>
     <div class="small muted path" id="outDir"></div>
     <button class="primary" id="save" title="Save (Ctrl+S)">Save points</button>
+    <button id="inspect" title="Save the points and send the robot to them, in order (far_planner_launch.xml must be running)" disabled>Start inspection</button>
     <div id="status" role="status"></div>
   </footer>
 </aside>
@@ -630,6 +631,7 @@ function renderList() {
   $("count").textContent = points.length;
   $("undo").disabled = !history.length;
   $("clear").disabled = !points.length;
+  $("inspect").disabled = !points.length || !(meta && meta.live);
   if (!points.length) {
     const li = document.createElement("li");
     li.className = "empty";
@@ -678,6 +680,29 @@ async function save() {
   } catch (e) {
     setStatus("Save failed: " + e.message, "err");
   }
+}
+
+// Saves the points, then tells far_inspection_goals.py (far_planner_launch.xml) to send the robot to them.
+async function startInspection() {
+  const name = $("name").value.trim(), n = points.length;
+  if (!confirm("Save " + n + " point" + (n === 1 ? "" : "s") + " to " + name + " and send the robot to " +
+               (n === 1 ? "it" : "them, in this order") + "?")) return;
+  setStatus("Starting the inspection…");
+  let saved = false;
+  try {
+    const r = await fetch("/api/inspection", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name, points }),
+    });
+    const j = await r.json();
+    saved = r.ok || r.status === 503;  // 503: saved, but nobody to start
+    if (!r.ok) throw new Error(j.error || r.statusText);
+    setStatus("Inspection started: " + j.count + " point" + (j.count === 1 ? "" : "s") + " from " + j.path, "ok");
+  } catch (e) {
+    setStatus("Inspection not started: " + e.message, "err");
+  }
+  if (saved) dirty = false;
 }
 
 async function load(name, quiet) {
@@ -910,6 +935,7 @@ $("fit").addEventListener("click", () => meta && fit());
 $("undo").addEventListener("click", undo);
 $("clear").addEventListener("click", clearAll);
 $("save").addEventListener("click", save);
+$("inspect").addEventListener("click", startInspection);
 $("load").addEventListener("click", () => load($("name").value.trim(), false));
 $("name").addEventListener("keydown", (e) => { if (e.key === "Enter") save(); });
 $("graphFile").addEventListener("change", () => loadGraph($("graphFile").value));
@@ -954,6 +980,7 @@ async function init() {
       $("liveInfo").textContent = meta.live_error;
       for (const id of ["lRobot", "lTrail", "lFar", "lTare", "lOpti", "lFollow"]) $(id).disabled = true;
       $("clearTrail").disabled = true;
+      $("inspect").title = "Needs the live robot view: " + meta.live_error;
     }
     await Promise.all([load(meta.default_name, true), refreshGraphs(false)]);
   } catch (e) {
