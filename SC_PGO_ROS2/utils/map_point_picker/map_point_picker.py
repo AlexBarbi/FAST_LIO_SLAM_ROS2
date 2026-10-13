@@ -21,7 +21,7 @@ when fast_lio_localization runs, else camera_init (the exploration, or a FAST-LI
 spawn). --no-live turns it off.
 
 Start inspection (needs the live view): saves the points like Save, then sends their file on
-/start_inspection (std_msgs/String) to legged_controllers far_inspection_goals.py, which
+/start_inspection (std_msgs/String) to far_planner far_inspection_goals.py, which
 far_planner_launch.xml runs and which sends the robot to the points, in order, only then.
 
 Needs only numpy: the PCD reader handles ascii, binary and binary_compressed (LZF) files,
