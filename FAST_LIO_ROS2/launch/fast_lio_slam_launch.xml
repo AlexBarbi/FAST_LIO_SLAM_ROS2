@@ -11,6 +11,8 @@
   <arg name="people" default="true" description="Detect and track people and keep them out of the SC-PGO and TARE scans (people_perception; autoware_lidar_centerpoint finds them in the points: needs CUDA and TensorRT)"/>
   <arg name="centerpoint_model" default="$(env HOME)/RaNAV/models/lidar_centerpoint/v4.1/short_range"
        description="With people:=true: folder of the CenterPoint model"/>
+  <arg name="detector" default="centerpoint"
+       description="With people:=true: centerpoint (TensorRT, needs CUDA) or centerpoint_cpu (same model with ONNX Runtime on the CPU, people_perception centerpoint_cpu.py)"/>
   <arg name="opti_pessi_obstacles" default="true"
        description="With people:=true: the tracked people go to OptiPessiController on /opti_pessi/obstacles. false when another node publishes that topic (yolo26_rgbd_detect)"/>
   <arg name="save_directory" default="$(env HOME)/.ros/sc_pgo/" description="SC-PGO poses and keyframes; its Scans/ subfolder is wiped on start"/>
@@ -47,6 +49,7 @@
   <include file="$(find-pkg-share people_perception)/launch/people_perception_launch.xml">
     <arg name="people" value="$(var people)"/>
     <arg name="centerpoint_model" value="$(var centerpoint_model)"/>
+    <arg name="detector" value="$(var detector)"/>
     <arg name="opti_pessi_obstacles" value="$(var opti_pessi_obstacles)"/>
     <arg name="use_sim_time" value="$(var use_sim_time)"/>
   </include>
