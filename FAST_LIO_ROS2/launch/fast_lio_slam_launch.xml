@@ -1,11 +1,21 @@
 <launch>
-  <!-- FAST-LIO + SC-PGO (src/FAST_LIO_SLAM_ROS2) on the simulated RoboSense Airy (lidar:=true in the world launch).
+  <!-- FAST-LIO + SC-PGO (src/FAST_LIO_SLAM_ROS2) on the RoboSense Airy: lidar:=sim the simulated one (lidar:=true in
+       the world launch), lidar:=real the real one, whose driver (rslidar_sdk) this launch then starts.
        Start it once the robot stands still: FAST-LIO takes gravity and camera_init from the first IMU samples.
        TF:  lio_map -> camera_init -> rslidar_lio -> lio_base   (FAST-LIO, legged_gazebo/config/fast_lio_airy.yaml)
                        camera_init -> aft_pgo                   (SC-PGO, loop-closed rslidar_lio)
        lio_map is the base frame when FAST-LIO started, lio_base the base pose FAST-LIO estimates.
        Both offsets are the rslidar_joint xyz in robot.xacro; the rotation is in imu_R/extrinsic_R. -->
-  <arg name="use_sim_time" default="true"/>
+  <arg name="lidar" default="sim"
+       description="sim: the simulated Airy of Gazebo. real: the real Airy, rslidar_sdk started here (config: src/rslidar_sdk/config/config.yaml), wall clock">
+    <choice value="sim"/>
+    <choice value="real"/>
+  </arg>
+  <arg name="use_sim_time" default="$(eval &quot;'$(var lidar)' == 'sim'&quot;)"
+       description="Default: true with lidar:=sim, false with lidar:=real"/>
+  <arg name="config"
+       default="$(find-pkg-share legged_gazebo)/config/$(eval &quot;'fast_lio_airy_real.yaml' if '$(var lidar)' == 'real' else 'fast_lio_airy.yaml'&quot;)"
+       description="FAST-LIO parameters; by default the ones of the lidar: fast_lio_airy.yaml (sim) or fast_lio_airy_real.yaml (real)"/>
   <arg name="rviz" default="true"/>
   <arg name="pgo" default="true" description="Run SC-PGO loop closure (needs sc_pgo_ros2 built)"/>
   <arg name="people" default="true" description="Detect and track people and keep them out of the SC-PGO and TARE scans (people_perception; autoware_lidar_centerpoint finds them in the points: needs CUDA and TensorRT)"/>
@@ -17,8 +27,13 @@
        description="With people:=true: the tracked people go to OptiPessiController on /opti_pessi/obstacles. false when another node publishes that topic (yolo26_rgbd_detect)"/>
   <arg name="save_directory" default="$(env HOME)/.ros/sc_pgo/" description="SC-PGO poses and keyframes; its Scans/ subfolder is wiped on start"/>
 
+  <!-- Real Airy: /rslidar_points and /rslidar_imu_data, as the simulated one publishes them. The driver reads
+       config/config.yaml from its source folder: edits there need no rebuild -->
+  <node if="$(eval &quot;'$(var lidar)' == 'real'&quot;)" pkg="rslidar_sdk" exec="rslidar_sdk_node" name="rslidar_sdk_node"
+        output="screen"/>
+
   <node pkg="fast_lio" exec="fastlio_mapping" name="laser_mapping" output="screen">
-    <param from="$(find-pkg-share legged_gazebo)/config/fast_lio_airy.yaml"/>
+    <param from="$(var config)"/>
     <param name="use_sim_time" value="$(var use_sim_time)"/>
   </node>
 
