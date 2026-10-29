@@ -18,11 +18,11 @@
        description="FAST-LIO parameters; by default the ones of the lidar: fast_lio_airy.yaml (sim) or fast_lio_airy_real.yaml (real)"/>
   <arg name="rviz" default="true"/>
   <arg name="pgo" default="true" description="Run SC-PGO loop closure (needs sc_pgo_ros2 built)"/>
-  <arg name="people" default="true" description="Detect and track people and keep them out of the SC-PGO and TARE scans (people_perception; autoware_lidar_centerpoint finds them in the points: needs CUDA and TensorRT)"/>
-  <arg name="centerpoint_model" default="$(env HOME)/RaNAV/models/lidar_centerpoint/v4.1/short_range"
-       description="With people:=true: folder of the CenterPoint model"/>
-  <arg name="detector" default="centerpoint"
-       description="With people:=true: centerpoint (TensorRT, needs CUDA) or centerpoint_cpu (same model with ONNX Runtime on the CPU, people_perception centerpoint_cpu.py)"/>
+  <arg name="people" default="true" description="Detect and track people and keep them out of the SC-PGO and TARE scans (people_perception; a CenterPoint detector finds them in the points, see detector)"/>
+  <arg name="centerpoint_model" default="$(find-pkg-prefix fast_lio)/../../models/lidar_centerpoint/v4.1/short_range"
+       description="With people:=true: folder of the CenterPoint model (default: models/ of the workspace fast_lio is installed from)"/>
+  <arg name="detector" default="auto"
+       description="With people:=true: centerpoint (TensorRT, needs CUDA), centerpoint_cpu (same model with ONNX Runtime on the CPU, people_perception centerpoint_cpu.py) or auto (centerpoint when autoware_lidar_centerpoint is installed, else centerpoint_cpu: a build with --no-cuda)"/>
   <arg name="opti_pessi_obstacles" default="true"
        description="With people:=true: the tracked people go to OptiPessiController on /opti_pessi/obstacles. false when another node publishes that topic (yolo26_rgbd_detect)"/>
   <arg name="save_directory" default="$(env HOME)/.ros/sc_pgo/" description="SC-PGO poses and keyframes; its Scans/ subfolder is wiped on start"/>
