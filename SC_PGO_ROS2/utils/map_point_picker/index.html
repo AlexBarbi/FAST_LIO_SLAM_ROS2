@@ -83,6 +83,8 @@
   #liveInfo { font-variant-numeric: tabular-nums; }
   #liveErrors { white-space: pre-line; color: #f0c05a; margin-top: 4px; }
   #liveSection .checks label.absent { color: var(--muted); }
+  .exit-buttons { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+  #exitsInfo, #exitsStatus { white-space: pre-line; }
   #liveSection .checks label:has(input:disabled) { opacity: .45; cursor: default; }
   #list { list-style: none; margin: 0 -16px; padding: 0; overflow-y: auto; flex: 1; }
   #list li {
@@ -188,6 +190,30 @@
     </div>
   </section>
 
+  <section id="exitSection">
+    <h2>Exits <span class="spacer"></span>
+      <button class="link" id="exitsReload" title="Read exits.yaml and the last report again">Reload</button>
+    </h2>
+    <div class="small muted" id="exitsInfo">No exits.</div>
+    <div class="checks">
+      <label><input type="checkbox" id="eDoors" checked> Doors and zones</label>
+      <label title="Exit signs with a side arrow: mapped, never inspected"><input type="checkbox" id="eRoute" checked><span class="swatch" style="--c:#60a5fa"></span>Route signs</label>
+      <label title="Where the robot looks at each door from"><input type="checkbox" id="eView" checked><span class="swatch line" style="--c:#e879f9"></span>Viewpoints</label>
+    </div>
+    <div class="legend small muted">
+      <span><span class="swatch" style="--c:#22c55e"></span>clear</span>
+      <span><span class="swatch" style="--c:#f5b301"></span>warning</span>
+      <span><span class="swatch" style="--c:#ef4444"></span>blocked</span>
+      <span><span class="swatch" style="--c:#9ca3af"></span>unverified</span>
+      <span><span class="swatch" style="--c:#e5e7eb"></span>not inspected</span>
+    </div>
+    <div class="exit-buttons">
+      <button id="exitInspect" disabled title="Send the robot to every exit door (exit_mission_launch.xml must be running)">Start exit inspection</button>
+      <button id="exitReport" disabled title="Latest exit inspection report">Open report</button>
+    </div>
+    <div class="small" id="exitsStatus" role="status"></div>
+  </section>
+
   <section id="points">
     <h2>Points <span id="count">0</span><span class="spacer"></span>
       <button class="link" id="undo" title="Undo (Ctrl+Z)" disabled>Undo</button>
@@ -239,6 +265,7 @@ let graphHover = -1;   // index of the graph node under the cursor
 let live = null;       // /api/live: {ok, frame, robot, paths: {far, tare, opti}, marks, errors}
 let trail = [];        // robot positions so far, [[x, y], ...] in live.frame
 let liveFrame = null;
+let exitsData = null;  // /api/exits: {exits, report, live: {verdicts, pass}}
 
 const FLOOR_MARGIN = 0.15;  // "Hide floor" drops points up to this far above the local floor, in m
 const HIT_RADIUS = 10;      // CSS px
@@ -476,6 +503,62 @@ function drawLive() {
   }
 }
 
+// Exits of the exit inspection: door, zone in front of it colored by the verdict (live first, else the last report),
+// viewpoint arrow, label.
+const VERDICT = { CLEAR: "#22c55e", WARNING: "#f5b301", BLOCKED: "#ef4444", UNVERIFIED: "#9ca3af" };
+const NOT_INSPECTED = "#e5e7eb", ROUTE = "#60a5fa", VIEW = "#e879f9";
+const LIVE_VERDICT_AGE = 10;  // s: an older live verdict gives way to the report
+
+function exitVerdict(e) {
+  const lv = exitsData && exitsData.live && exitsData.live.verdicts[String(e.id)];
+  if (lv && lv.age < LIVE_VERDICT_AGE) return { v: lv.verdict, reason: lv.reason, live: true };
+  return e.verdict ? { v: e.verdict, reason: e.reason, live: false } : null;
+}
+
+function viewArrow(vp) {
+  const [sx, sy] = toScreen(vp.x, vp.y), L = Math.max(18, 0.6 * view.s);
+  ctx.beginPath(); ctx.arc(sx, sy, 4, 0, 2 * Math.PI); ctx.fillStyle = VIEW; ctx.fill();
+  arrow(sx, sy, sx + L * Math.cos(vp.yaw), sy - L * Math.sin(vp.yaw), VIEW);
+}
+
+function drawExits() {
+  if (!exitsData || !exitsData.exits.length) return;
+  const rep = exitsData.report || {}, margin = rep.margin || 0.5, depth = rep.depth || 3.0;
+  const pass = exitsData.live && exitsData.live.pass;
+  ctx.save();
+  ctx.lineJoin = ctx.lineCap = "round";
+  ctx.font = "600 11px system-ui, sans-serif"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  for (const e of exitsData.exits) {
+    if (e.type !== "door") {
+      if ($("eRoute").checked && e.sign_center) liveMark(e.sign_center, ROUTE, true);
+      continue;
+    }
+    if (!$("eDoors").checked || !e.door_floor_center || !e.normal) continue;
+    const [cx, cy] = e.door_floor_center, nl = Math.hypot(e.normal[0], e.normal[1]) || 1;
+    const nx = e.normal[0] / nl, ny = e.normal[1] / nl, tx = -ny, ty = nx;
+    const half = (e.door_width || 1.2) / 2, zh = half + margin;
+    const vd = exitVerdict(e), color = vd ? (VERDICT[vd.v] || NOT_INSPECTED) : NOT_INSPECTED;
+    const zone = [[-zh, 0], [-zh, depth], [zh, depth], [zh, 0]].map(([u, v]) => toScreen(cx + u * tx + v * nx, cy + u * ty + v * ny));
+    ctx.beginPath(); zone.forEach(([x, y], i) => i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)); ctx.closePath();
+    ctx.globalAlpha = 0.25; ctx.fillStyle = color; ctx.fill(); ctx.globalAlpha = 1;
+    ctx.setLineDash(vd ? [] : [5, 4]); ctx.lineWidth = 1.5; ctx.strokeStyle = color; ctx.stroke(); ctx.setLineDash([]);
+    const a = toScreen(cx - half * tx, cy - half * ty), b = toScreen(cx + half * tx, cy + half * ty);
+    ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]);
+    ctx.lineWidth = 8; ctx.strokeStyle = "rgba(0,0,0,0.7)"; ctx.stroke();
+    ctx.lineWidth = 4.5; ctx.strokeStyle = color; ctx.stroke();
+    if ($("eView").checked && e.viewpoint && !(pass && pass.state !== "idle" && pass.state !== "done")) viewArrow(e.viewpoint);
+    const [lx, ly] = toScreen(cx + (depth + 0.6) * nx, cy + (depth + 0.6) * ny);
+    const label = "E" + e.id + (vd ? " " + vd.v + (vd.live ? " ·live" : "") : "");
+    const tw = ctx.measureText(label).width + 12;
+    ctx.fillStyle = "rgba(0,0,0,0.72)"; ctx.beginPath(); ctx.roundRect(lx - tw / 2, ly - 9, tw, 18, 9); ctx.fill();
+    ctx.fillStyle = color; ctx.fillText(label, lx, ly + 0.5);
+  }
+  if ($("eView").checked && pass && pass.state !== "idle" && pass.state !== "done") {
+    for (const vp of pass.viewpoints || []) if (vp.x !== undefined) viewArrow(vp);
+  }
+  ctx.restore();
+}
+
 // Footprint of the base (0.65 x 0.30 m, Aliengo-sized, never smaller than a few pixels) and a heading chevron.
 function drawRobot() {
   if (!live || !live.ok || !live.robot || !$("lRobot").checked) return;
@@ -531,6 +614,7 @@ function draw() {
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   if ($("showGrid").checked) drawGrid();
   drawGraph();
+  drawExits();
   drawLive();
   drawOrigin();
   drawPoints();
@@ -818,7 +902,60 @@ async function pollLive() {
   setTimeout(pollLive, document.hidden ? Math.max(next, 1000) : next);
 }
 
+async function refreshExits() {
+  try {
+    const r = await fetch("/api/exits", { cache: "no-store" });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || r.statusText);
+    exitsData = j;
+  } catch (e) {
+    $("exitsInfo").textContent = "Exits not read: " + e.message;
+    return;
+  }
+  const doors = exitsData.exits.filter((e) => e.type === "door"), routes = exitsData.exits.length - doors.length;
+  const lines = [];
+  if (!exitsData.exits.length) lines.push("No exits (" + exitsData.folder + "/exits.yaml).");
+  else lines.push(doors.length + " door exit" + (doors.length === 1 ? "" : "s") + (routes ? ", " + routes + " route sign" + (routes === 1 ? "" : "s") : ""));
+  const rep = exitsData.report;
+  if (rep && rep.summary) {
+    lines.push("Last inspection " + (rep.finished || "") + ": " +
+      Object.entries(rep.summary).filter(([, n]) => n).map(([v, n]) => n + " " + v.toLowerCase()).join(", "));
+  }
+  const pass = exitsData.live && exitsData.live.pass;
+  if (pass && pass.state && pass.state !== "idle") {
+    lines.push("Pass: " + pass.state + (pass.current_exit !== null && pass.current_exit !== undefined ? ", exit E" + pass.current_exit : "") +
+      " (" + (pass.results || []).length + "/" + (pass.viewpoints || []).length + " done)");
+  }
+  $("exitsInfo").textContent = lines.join("\n");
+  $("exitInspect").disabled = !(meta && meta.live && doors.length);
+  $("exitReport").disabled = !(rep && rep.html);
+  requestDraw();
+}
+
+async function pollExits() {
+  await refreshExits();
+  setTimeout(pollExits, document.hidden ? 10000 : 2000);
+}
+
+async function startExitInspection() {
+  if (!confirm("Send the robot to every exit door and check the zone in front of it?")) return;
+  $("exitsStatus").textContent = "Starting the exit inspection…";
+  try {
+    const r = await fetch("/api/exit_inspection", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || r.statusText);
+    $("exitsStatus").textContent = "Exit inspection started (" + j.path + ")";
+  } catch (e) {
+    $("exitsStatus").textContent = "Exit inspection not started: " + e.message;
+  }
+}
+
 // ------------------------------------------------------------ input
+
+$("exitsReload").addEventListener("click", refreshExits);
+$("exitInspect").addEventListener("click", startExitInspection);
+$("exitReport").addEventListener("click", () => window.open("/api/report", "_blank", "noopener"));
+for (const id of ["eDoors", "eRoute", "eView"]) $(id).addEventListener("change", () => requestDraw());
 
 function hitTest(mx, my) {
   for (let i = points.length - 1; i >= 0; i--) {
@@ -976,7 +1113,10 @@ async function init() {
     renderList();
     if (meta.live) {
       pollLive();
+      pollExits();
     } else {
+      refreshExits();
+      $("exitInspect").title = "Needs the live robot view: " + meta.live_error;
       $("liveInfo").textContent = meta.live_error;
       for (const id of ["lRobot", "lTrail", "lFar", "lTare", "lOpti", "lFollow"]) $(id).disabled = true;
       $("clearTrail").disabled = true;
