@@ -29,7 +29,8 @@
        description="With people:=true: centerpoint (TensorRT, needs CUDA), centerpoint_cpu (same model with ONNX Runtime on the CPU, people_perception centerpoint_cpu.py) or auto (centerpoint when autoware_lidar_centerpoint is installed, else centerpoint_cpu: a build with --no-cuda)"/>
   <arg name="opti_pessi_obstacles" default="true"
        description="With people:=true: the tracked people go to OptiPessiController on /opti_pessi/obstacles. false when another node publishes that topic (yolo26_rgbd_detect)"/>
-  <arg name="save_directory" default="$(env HOME)/.ros/sc_pgo/" description="SC-PGO poses and keyframes; its Scans/ subfolder is wiped on start"/>
+  <arg name="save_directory" default="$(find-pkg-share map_generator)/save_data/"
+       description="SC-PGO poses and keyframes, read by map_generator and the TARE/FAR launches (default: save_data/ of the map_generator package); its Scans/ subfolder is wiped on start"/>
 
   <!-- Real Airy: /rslidar_points and /rslidar_imu_data, as the simulated one publishes them. The driver reads
        config/config.yaml from its source folder: edits there need no rebuild -->
@@ -49,7 +50,6 @@
     <param name="sc_dist_thres" value="0.3"/>
     <param name="sc_max_radius" value="20.0"/>   <!-- indoor; Airy range is 60 m -->
     <param name="mapviz_filter_size" value="0.1"/>
-    <param name="save_directory" value="./src/FAST_LIO_SLAM_ROS2/save_data/"/>
     <remap from="/aft_mapped_to_init" to="/Odometry"/>
     <remap from="/velodyne_cloud_registered_local" to="/cloud_registered_body_static"/>
   </node>

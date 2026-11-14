@@ -799,8 +799,11 @@ class LaserMappingNode : public rclcpp::Node {
     // body must have the base orientation (rotate the IMU there with imu_R).
     // init_aliases: identity children of camera_init, for nodes that give
     // camera_init points another frame name.
+    // base_odom_topic: /Odometry moved from the body to base_frame (same frame,
+    // stamp and covariance), for nodes that place the robot by its base.
     this->declare_parameter<string>("frames.map_frame", "");
     this->declare_parameter<string>("frames.base_frame", "");
+    this->declare_parameter<string>("frames.base_odom_topic", "");
     this->declare_parameter<vector<double>>("frames.body_in_base",
                                             vector<double>{0., 0., 0.});
     this->declare_parameter<vector<string>>("frames.init_aliases",
@@ -877,6 +880,8 @@ class LaserMappingNode : public rclcpp::Node {
     body_in_base_ << VEC_FROM_ARRAY(body_in_base);
     const vector<string> init_aliases =
         this->get_parameter("frames.init_aliases").as_string_array();
+    const string base_odom_topic =
+        this->get_parameter("frames.base_odom_topic").as_string();
     const string odom_topic =
         this->get_parameter("alignment.odom_topic").as_string();
     odom_frame_ = this->get_parameter("alignment.odom_frame").as_string();
@@ -982,6 +987,14 @@ class LaserMappingNode : public rclcpp::Node {
       static_tf_broadcaster_ =
           std::make_unique<tf2_ros::StaticTransformBroadcaster>(*this);
       static_tf_broadcaster_->sendTransform(statics);
+    }
+
+    if (!base_odom_topic.empty()) {
+      if (base_frame_.empty())
+        throw std::invalid_argument(
+            "frames.base_odom_topic needs frames.base_frame");
+      pubBaseOdom_ =
+          this->create_publisher<nav_msgs::msg::Odometry>(base_odom_topic, 20);
     }
 
     if (!odom_topic.empty()) {
@@ -1093,6 +1106,20 @@ class LaserMappingNode : public rclcpp::Node {
     tf.transform.translation.z = translation(2);
     tf.transform.rotation.w = 1.0;
     return tf;
+  }
+
+  // /Odometry (after publish_odometry: covariance filled) with the pose of
+  // base_frame_, which is body_in_base_ away and has the body orientation
+  void publish_base_odometry() {
+    nav_msgs::msg::Odometry base = odomAftMapped;
+    base.child_frame_id = base_frame_;
+    const V3D p = state_point.pos +
+                  Eigen::Quaterniond(geoQuat.w, geoQuat.x, geoQuat.y, geoQuat.z) *
+                      (-body_in_base_);
+    base.pose.pose.position.x = p(0);
+    base.pose.pose.position.y = p(1);
+    base.pose.pose.position.z = p(2);
+    pubBaseOdom_->publish(base);
   }
 
   void odom_cbk(const nav_msgs::msg::Odometry::ConstSharedPtr msg) {
@@ -1296,6 +1323,7 @@ class LaserMappingNode : public rclcpp::Node {
 
       /******* Publish odometry *******/
       publish_odometry(pubOdomAftMapped_, tf_broadcaster_);
+      if (pubBaseOdom_) publish_base_odometry();
       if (sub_odom_) publish_alignment();
 
       /*** add the feature points to map kdtree ***/
@@ -1396,6 +1424,7 @@ class LaserMappingNode : public rclcpp::Node {
   std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
   std::unique_ptr<tf2_ros::StaticTransformBroadcaster> static_tf_broadcaster_;
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr sub_odom_;
+  rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pubBaseOdom_;
   // odom -> base of alignment.odom_topic, the last 2 s. V3D and M3D: no
   // Eigen alignment needed in the deque
   struct OdomSample {
