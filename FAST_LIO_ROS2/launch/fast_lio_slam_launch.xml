@@ -2,10 +2,14 @@
   <!-- FAST-LIO + SC-PGO (src/FAST_LIO_SLAM_ROS2) on the RoboSense Airy: lidar:=sim the simulated one (lidar:=true in
        the world launch), lidar:=real the real one, whose driver (rslidar_sdk) this launch then starts.
        Start it once the robot stands still: FAST-LIO takes gravity and camera_init from the first IMU samples.
-       TF:  lio_map -> camera_init -> rslidar_lio -> lio_base   (FAST-LIO, legged_gazebo/config/fast_lio_airy.yaml)
-                       camera_init -> aft_pgo                   (SC-PGO, loop-closed rslidar_lio)
-       lio_map is the base frame when FAST-LIO started, lio_base the base pose FAST-LIO estimates.
-       Both offsets are the rslidar_joint xyz in robot.xacro; the rotation is in imu_R/extrinsic_R. -->
+       TF:  odom -> lio_map -> camera_init -> rslidar_lio -> lio_base   (all FAST-LIO, legged_gazebo/config/fast_lio_airy.yaml)
+                               camera_init -> map                       (identity: camera_init points stamped "map")
+                               camera_init -> aft_pgo                   (SC-PGO, loop-closed rslidar_lio)
+       lio_map is the base frame when FAST-LIO started, lio_base the base pose FAST-LIO estimates: both offsets are
+       frames.body_in_base, the rslidar_joint xyz in robot.xacro; the rotation is in imu_R/extrinsic_R.
+       odom -> lio_map joins the legged estimator tree (odom -> base, /odom) to the FAST-LIO one: re-set on every
+       /Odometry so that lio_base lands on base (alignment.*). The two estimators drift apart, and a static TF would
+       put relayed goals off by that drift. -->
   <arg name="lidar" default="sim"
        description="sim: the simulated Airy of Gazebo. real: the real Airy, rslidar_sdk started here (config: src/rslidar_sdk/config/config.yaml), wall clock">
     <choice value="sim"/>
@@ -36,11 +40,6 @@
     <param from="$(var config)"/>
     <param name="use_sim_time" value="$(var use_sim_time)"/>
   </node>
-
-  <node pkg="tf2_ros" exec="static_transform_publisher" name="lio_map_to_camera_init"
-    args="--x 0.2835 --z 0.066 --frame-id lio_map --child-frame-id camera_init"/>
-  <node pkg="tf2_ros" exec="static_transform_publisher" name="rslidar_lio_to_lio_base"
-    args="--x -0.2835 --z -0.066 --frame-id rslidar_lio --child-frame-id lio_base"/>
 
   <node if="$(var pgo)" pkg="sc_pgo_ros2" exec="alaserPGO" name="alaserPGO" output="screen">
     <param name="use_sim_time" value="$(var use_sim_time)"/>

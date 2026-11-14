@@ -42,10 +42,12 @@
 #include <pcl/point_types.h>
 #include <pcl_conversions/pcl_conversions.h>
 #include <so3_math.h>
+#include <tf2_ros/static_transform_broadcaster.h>
 #include <tf2_ros/transform_broadcaster.h>
 #include <unistd.h>
 
 #include <Eigen/Core>
+#include <Eigen/Geometry>
 #include <chrono>
 #include <csignal>
 #include <fstream>
@@ -790,6 +792,28 @@ class LaserMappingNode : public rclcpp::Node {
                                             vector<double>());
     this->declare_parameter<vector<double>>(
         "mapping.imu_R", vector<double>{1., 0., 0., 0., 1., 0., 0., 0., 1.});
+    // Frames for joining FAST-LIO to a robot TF tree; empty: not published.
+    // map_frame: static parent of camera_init, the base where FAST-LIO started.
+    // base_frame: static child of the body frame, the base FAST-LIO estimates.
+    // body_in_base: body (IMU) origin in the base frame. Translation only: the
+    // body must have the base orientation (rotate the IMU there with imu_R).
+    // init_aliases: identity children of camera_init, for nodes that give
+    // camera_init points another frame name.
+    this->declare_parameter<string>("frames.map_frame", "");
+    this->declare_parameter<string>("frames.base_frame", "");
+    this->declare_parameter<vector<double>>("frames.body_in_base",
+                                            vector<double>{0., 0., 0.});
+    this->declare_parameter<vector<string>>("frames.init_aliases",
+                                            vector<string>{});
+    // Odometry of another estimator of the same base (e.g. the legged
+    // estimator's /odom, odom -> base). Non-empty: on every /Odometry the TF
+    // alignment.odom_frame -> frames.map_frame is set so that base_frame lands
+    // on that odometry's base at that stamp, kept to x, y, z and yaw (both
+    // gravity-aligned): T_odom_map = T_odom_base(t) * T_map_base(t)^-1.
+    // The /odom sample nearest in stamp is used, if within max_stamp_gap s.
+    this->declare_parameter<string>("alignment.odom_topic", "");
+    this->declare_parameter<string>("alignment.odom_frame", "odom");
+    this->declare_parameter<double>("alignment.max_stamp_gap", 0.05);
 
     this->get_parameter_or<bool>("publish.path_en", path_en, true);
     this->get_parameter_or<bool>("publish.effect_map_en", effect_pub_en, false);
@@ -844,6 +868,19 @@ class LaserMappingNode : public rclcpp::Node {
                                            vector<double>());
     this->get_parameter_or<vector<double>>("mapping.imu_R", imuR,
                                            vector<double>());
+    map_frame_ = this->get_parameter("frames.map_frame").as_string();
+    base_frame_ = this->get_parameter("frames.base_frame").as_string();
+    const vector<double> body_in_base =
+        this->get_parameter("frames.body_in_base").as_double_array();
+    if (body_in_base.size() != 3)
+      throw std::invalid_argument("frames.body_in_base needs 3 values");
+    body_in_base_ << VEC_FROM_ARRAY(body_in_base);
+    const vector<string> init_aliases =
+        this->get_parameter("frames.init_aliases").as_string_array();
+    const string odom_topic =
+        this->get_parameter("alignment.odom_topic").as_string();
+    odom_frame_ = this->get_parameter("alignment.odom_frame").as_string();
+    max_stamp_gap_ = this->get_parameter("alignment.max_stamp_gap").as_double();
 
     RCLCPP_INFO(this->get_logger(), "p_pre->lidar_type %d", p_pre->lidar_type);
 
@@ -927,6 +964,36 @@ class LaserMappingNode : public rclcpp::Node {
         this->create_publisher<nav_msgs::msg::Odometry>("/Odometry", 20);
     pubPath_ = this->create_publisher<nav_msgs::msg::Path>("/path", 20);
     tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
+
+    // camera_init is the body at the first scan, so map_frame -> camera_init
+    // is the body in the base, and body -> base_frame its inverse
+    if (!base_frame_.empty() && body_frame_.empty())
+      throw std::invalid_argument(
+          "frames.base_frame needs common.body_frame: the body frame is a "
+          "fixed name only then");
+    vector<geometry_msgs::msg::TransformStamped> statics;
+    if (!map_frame_.empty())
+      statics.push_back(static_tf(map_frame_, "camera_init", body_in_base_));
+    if (!base_frame_.empty())
+      statics.push_back(static_tf(lidar_frame_, base_frame_, -body_in_base_));
+    for (const string &alias : init_aliases)
+      statics.push_back(static_tf("camera_init", alias, V3D::Zero()));
+    if (!statics.empty()) {
+      static_tf_broadcaster_ =
+          std::make_unique<tf2_ros::StaticTransformBroadcaster>(*this);
+      static_tf_broadcaster_->sendTransform(statics);
+    }
+
+    if (!odom_topic.empty()) {
+      if (map_frame_.empty() || base_frame_.empty())
+        throw std::invalid_argument(
+            "alignment.odom_topic needs frames.map_frame and "
+            "frames.base_frame");
+      // Up to 200 Hz, stored for longer than FAST-LIO lags behind its stamps
+      sub_odom_ = this->create_subscription<nav_msgs::msg::Odometry>(
+          odom_topic, 50,
+          std::bind(&LaserMappingNode::odom_cbk, this, std::placeholders::_1));
+    }
 
     //------------------------------------------------------------------------------------------------------
     auto period_ms =
@@ -1013,6 +1080,95 @@ class LaserMappingNode : public rclcpp::Node {
     trans.transform.rotation.z = odomAftMapped.pose.pose.orientation.z;
     tf_br->sendTransform(trans);
   }
+
+  geometry_msgs::msg::TransformStamped static_tf(const string &parent,
+                                                 const string &child,
+                                                 const V3D &translation) {
+    geometry_msgs::msg::TransformStamped tf;
+    tf.header.stamp = this->get_clock()->now();
+    tf.header.frame_id = parent;
+    tf.child_frame_id = child;
+    tf.transform.translation.x = translation(0);
+    tf.transform.translation.y = translation(1);
+    tf.transform.translation.z = translation(2);
+    tf.transform.rotation.w = 1.0;
+    return tf;
+  }
+
+  void odom_cbk(const nav_msgs::msg::Odometry::ConstSharedPtr msg) {
+    const double stamp = get_time_sec(msg->header.stamp);
+    // Time went back (simulation reset, bag loop): the old samples are stale
+    if (!odom_history_.empty() && stamp < odom_history_.back().stamp)
+      odom_history_.clear();
+    const auto &p = msg->pose.pose;
+    odom_history_.push_back(
+        {stamp, V3D(p.position.x, p.position.y, p.position.z),
+         Eigen::Quaterniond(p.orientation.w, p.orientation.x, p.orientation.y,
+                            p.orientation.z)
+             .normalized()
+             .toRotationMatrix()});
+    while (odom_history_.front().stamp < stamp - 2.0)
+      odom_history_.pop_front();
+  }
+
+  // odom_frame_ -> map_frame_ such that base_frame_ lands on the odometry's
+  // base at lidar_end_time (see alignment.odom_topic)
+  void publish_alignment() {
+    if (odom_history_.empty()) {
+      RCLCPP_WARN_ONCE(this->get_logger(),
+                       "alignment: no message on alignment.odom_topic yet, "
+                       "%s -> %s follows from the first one",
+                       odom_frame_.c_str(), map_frame_.c_str());
+      return;
+    }
+    const auto nearest = std::min_element(
+        odom_history_.begin(), odom_history_.end(),
+        [](const OdomSample &a, const OdomSample &b) {
+          return std::abs(a.stamp - lidar_end_time) <
+                 std::abs(b.stamp - lidar_end_time);
+        });
+    const double gap = nearest->stamp - lidar_end_time;
+    if (std::abs(gap) > max_stamp_gap_) {
+      RCLCPP_WARN_THROTTLE(
+          this->get_logger(), *this->get_clock(), 5000,
+          "alignment skipped: nearest odometry is %+.3f s from /Odometry at "
+          "%.3f s (different clocks?)",
+          gap, lidar_end_time);
+      return;
+    }
+
+    Eigen::Isometry3d init_body = Eigen::Isometry3d::Identity();
+    init_body.translation() = state_point.pos;
+    init_body.linear() =
+        Eigen::Quaterniond(geoQuat.w, geoQuat.x, geoQuat.y, geoQuat.z)
+            .toRotationMatrix();
+    Eigen::Isometry3d odom_base = Eigen::Isometry3d::Identity();
+    odom_base.translation() = nearest->pos;
+    odom_base.linear() = nearest->rot;
+    const Eigen::Translation3d body_in_base(body_in_base_);
+    const Eigen::Isometry3d map_base =
+        body_in_base * init_body * body_in_base.inverse();
+    const Eigen::Isometry3d odom_map = odom_base * map_base.inverse();
+    const double yaw = atan2(odom_map(1, 0), odom_map(0, 0));
+
+    geometry_msgs::msg::TransformStamped tf;
+    tf.header.stamp = get_ros_time(lidar_end_time);
+    tf.header.frame_id = odom_frame_;
+    tf.child_frame_id = map_frame_;
+    tf.transform.translation.x = odom_map.translation()(0);
+    tf.transform.translation.y = odom_map.translation()(1);
+    tf.transform.translation.z = odom_map.translation()(2);
+    tf.transform.rotation.z = sin(yaw / 2);
+    tf.transform.rotation.w = cos(yaw / 2);
+    tf_broadcaster_->sendTransform(tf);
+
+    RCLCPP_INFO_ONCE(this->get_logger(),
+                     "alignment: %s -> %s (%.3f, %.3f, %.3f), yaw %.2f deg",
+                     odom_frame_.c_str(), map_frame_.c_str(),
+                     odom_map.translation()(0), odom_map.translation()(1),
+                     odom_map.translation()(2), yaw * 180.0 / M_PI);
+  }
+
   void publish_frame_body(
       rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr
           pubLaserCloudFull_body) {
@@ -1140,6 +1296,7 @@ class LaserMappingNode : public rclcpp::Node {
 
       /******* Publish odometry *******/
       publish_odometry(pubOdomAftMapped_, tf_broadcaster_);
+      if (sub_odom_) publish_alignment();
 
       /*** add the feature points to map kdtree ***/
       t3 = omp_get_wtime();
@@ -1237,6 +1394,19 @@ class LaserMappingNode : public rclcpp::Node {
       sub_pcl_livox_;
 
   std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
+  std::unique_ptr<tf2_ros::StaticTransformBroadcaster> static_tf_broadcaster_;
+  rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr sub_odom_;
+  // odom -> base of alignment.odom_topic, the last 2 s. V3D and M3D: no
+  // Eigen alignment needed in the deque
+  struct OdomSample {
+    double stamp;
+    V3D pos;
+    M3D rot;
+  };
+  std::deque<OdomSample> odom_history_;
+  string map_frame_, base_frame_, odom_frame_;
+  V3D body_in_base_;
+  double max_stamp_gap_ = 0.05;
   rclcpp::TimerBase::SharedPtr timer_;
   rclcpp::TimerBase::SharedPtr map_pub_timer_;
   rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr map_save_srv_;

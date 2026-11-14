@@ -60,6 +60,7 @@ find_package(visualization_msgs REQUIRED)
 find_package(pcl_ros REQUIRED)
 find_package(pcl_conversions REQUIRED)
 find_package(livox_ros_driver2 REQUIRED)
+find_package(tf2_ros REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 
 set(dependencies
@@ -74,6 +75,7 @@ set(dependencies
   pcl_ros
   pcl_conversions
   livox_ros_driver2
+  tf2_ros
 )
 
 # Thirdparty libraries
@@ -117,10 +119,6 @@ ament_target_dependencies(fastlio_mapping ${dependencies})
 
 # ---------------- Install --------------- #
 install(TARGETS fastlio_mapping
-  DESTINATION lib/${PROJECT_NAME}
-)
-
-install(PROGRAMS scripts/lio_odom_alignment.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

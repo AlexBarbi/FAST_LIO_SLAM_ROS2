@@ -275,7 +275,7 @@ class LiveBridge:
 
     Messages are kept in their own frame, as received, and moved with the latest TF when the page asks
     (like tare_path_to_opti_pessi_goal.py: planner and controller stamps come from different clocks).
-    OptiPessi publishes in odom, which reaches the map through lio_odom_alignment's odom -> lio_map.
+    OptiPessi publishes in odom, which reaches the map through FAST-LIO's odom -> lio_map.
     """
     STALE = 5.0  # s without a message before a path or mark is no longer shown
     ROBOT_STALE = 3.0  # s without /Odometry before the robot is no longer shown
