@@ -10,6 +10,9 @@ from numpy import linalg as LA
 import open3d as o3d # intensity is read/written through the o3d.t (tensor) API; pypcd does not work with numpy 2
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
+import sys
+sys.path.insert(0, script_dir)
+import dynamic_removal
 jet_table = np.load(os.path.join(script_dir, 'jet_table.npy'))
 bone_table = np.load(os.path.join(script_dir, 'bone_table.npy'))
 
@@ -37,13 +40,20 @@ parser.add_argument("--no-vis", action="store_true",
                     help="save the map without opening the viewer, which blocks until its window is closed (unattended runs)")
 parser.add_argument("--output", default=None,
                     help="map file to save; a relative path is inside data_dir (default: map_<first>_to_<last>_with_intensity.pcd)")
+parser.add_argument("--keep-dynamic", action="store_true",
+                    help="keep the points of things that moved (people, carts). By default they are removed: a point is "
+                         "dropped when other keyframes saw through where it was (dynamic_removal.py)")
+parser.add_argument("--dynamic-output", default=None,
+                    help="also save the removed points to this PCD (relative: inside data_dir), to check what went")
+parser.add_argument("--max-range", type=float, default=0.0,
+                    help="drop points farther than this from their keyframe, in m, after the dynamic removal (which uses "
+                         "them all); 0 keeps them all (default: 0)")
 args = parser.parse_args()
 
 data_dir = os.path.join(os.path.expanduser(args.data_dir), "")
 scan_idx_range_to_stack = [0, 1000] # if you want a whole map, use [0, len(scan_files)]
 node_skip = 1
 
-num_points_in_a_scan = 150000 # for reservation (save faster) // e.g., use 150000 for 128 ray lidars, 100000 for 64 ray lidars, 30000 for 16 ray lidars, if error occured, use the larger value.
 
 is_live_vis = False # recommend to use false
 is_o3d_vis = not args.no_vis
@@ -55,14 +65,7 @@ thres_near_removal = args.near # meter (to remove platform-myself structure ghos
 ##########################
 
 
-def estimate_floor_z(z):
-    # The floor is the most populated 5 cm height band in the lower half of the map.
-    # Looking only below the median keeps a ceiling from winning.
-    z_low = z[z <= np.median(z)]
-    num_bins = max(1, int(np.ceil((z_low.max() - z_low.min()) / 0.05)))
-    counts, edges = np.histogram(z_low, bins=num_bins)
-    peak = np.argmax(counts)
-    return 0.5 * (edges[peak] + edges[peak + 1])
+estimate_floor_z = dynamic_removal.estimate_floor_z
 
 
 #
@@ -100,13 +103,10 @@ nodes_count = 0
 
 # The scans from 000000.pcd should be prepared if it is not used (because below code indexing is designed in a naive way)
 
-# manually reserve memory for fast write
-num_all_points_expected = int(num_points_in_a_scan * np.round((scan_idx_range_to_stack[1] - scan_idx_range_to_stack[0])/node_skip))
-
-np_xyz_all = np.empty([num_all_points_expected, 3])
-np_intensity_all = np.empty([num_all_points_expected, 1])
-curr_count = 0
-scan_ends = [] # end of each stacked scan in np_xyz_all, for the live viewer
+# The keyframes are read first and stacked after the dynamic removal, which looks at each map point from every keyframe
+scans_local = []
+scans_intensity = []
+scan_poses = []
 
 for node_idx in range(num_nodes):
     if(node_idx < scan_idx_range_to_stack[0] or node_idx >= scan_idx_range_to_stack[1]):
@@ -127,27 +127,41 @@ for node_idx in range(num_nodes):
 
     scan_intensity = o3d.t.io.read_point_cloud(scan_path).point.intensity.numpy()[:, 0]
 
-    scan_pcd_global = scan_pcd.transform(scan_pose) # global coord, note that this is not deepcopy
-    scan_xyz = np.asarray(scan_pcd_global.points)
-
     scan_intensity = np.expand_dims(scan_intensity, axis=1)
     scan_ranges = LA.norm(scan_xyz_local, axis=1)
 
     if(is_near_removal):
         eff_idxes = np.where (scan_ranges > thres_near_removal)
-        scan_xyz = scan_xyz[eff_idxes[0], :]
+        scan_xyz_local = scan_xyz_local[eff_idxes[0], :]
         scan_intensity = scan_intensity[eff_idxes[0], :]
 
-    # save
-    np_xyz_all[curr_count:curr_count + scan_xyz.shape[0], :] = scan_xyz
-    np_intensity_all[curr_count:curr_count + scan_xyz.shape[0], :] = scan_intensity
+    scans_local.append(scan_xyz_local)
+    scans_intensity.append(scan_intensity)
+    scan_poses.append(scan_pose)
 
-    curr_count = curr_count + scan_xyz.shape[0]
+if args.keep_dynamic:
+    dynamic_masks = [np.zeros(len(s), dtype=bool) for s in scans_local]
+else:
+    dynamic_masks = dynamic_removal.find_dynamic(scans_local, scan_poses)
+
+curr_count = 0
+scan_ends = [] # end of each stacked scan in np_xyz_all, for the live viewer
+kept_xyz, kept_intensity, removed_xyz, removed_intensity = [], [], [], []
+for scan_xyz_local, scan_intensity, scan_pose, dynamic in zip(scans_local, scans_intensity, scan_poses, dynamic_masks):
+    scan_xyz = scan_xyz_local @ scan_pose[:3, :3].T + scan_pose[:3, 3] # global coord
+    keep = ~dynamic
+    if args.max_range > 0:
+        keep &= LA.norm(scan_xyz_local, axis=1) < args.max_range
+    kept_xyz.append(scan_xyz[keep])
+    kept_intensity.append(scan_intensity[keep])
+    removed_xyz.append(scan_xyz[dynamic])
+    removed_intensity.append(scan_intensity[dynamic])
+    curr_count = curr_count + int(keep.sum())
     scan_ends.append(curr_count)
-    print(curr_count)
 
-np_xyz_all = np_xyz_all[0:curr_count, :]
-np_intensity_all = np_intensity_all[0:curr_count, :]
+np_xyz_all = np.vstack(kept_xyz) if kept_xyz else np.empty([0, 3])
+np_intensity_all = np.vstack(kept_intensity) if kept_intensity else np.empty([0, 1])
+print("stacked", curr_count, "points from", len(scans_local), "keyframes")
 
 
 # The viewer colors and floor cut need the whole map (height range, floor height), so they are applied after stacking
@@ -213,6 +227,14 @@ if args.output is not None:
     map_name = os.path.join(data_dir, os.path.expanduser(args.output)) # an absolute output replaces data_dir
 o3d.t.io.write_point_cloud(map_name, xyzi, compressed=True) # binary_compressed
 print("intensity map is save (path:", map_name, ")")
+
+if args.dynamic_output is not None:
+    removed = o3d.t.geometry.PointCloud()
+    removed.point.positions = o3d.core.Tensor(np.vstack(removed_xyz).astype(np.float32))
+    removed.point.intensity = o3d.core.Tensor(np.vstack(removed_intensity).astype(np.float32))
+    removed_name = os.path.join(data_dir, os.path.expanduser(args.dynamic_output))
+    o3d.t.io.write_point_cloud(removed_name, removed, compressed=True)
+    print("removed (dynamic) points saved (path:", removed_name, ")")
 
 # save rgb colored points
 # map_name = data_dir + "map_" + str(scan_idx_range_to_stack[0]) + "_to_" + str(scan_idx_range_to_stack[1]) + ".pcd"

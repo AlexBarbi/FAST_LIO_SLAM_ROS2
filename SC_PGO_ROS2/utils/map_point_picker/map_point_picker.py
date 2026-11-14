@@ -24,6 +24,12 @@ Start inspection (needs the live view): saves the points like Save, then sends t
 /start_inspection (std_msgs/String) to far_planner far_inspection_goals.py, which
 far_planner_launch.xml runs and which sends the robot to the points, in order, only then.
 
+Exits (src/exit_inspection): the exits of exit_inspection/exits.yaml next to the map (door, zone in front
+of it) are drawn colored by the verdict of the last exit inspection (exit_report.yaml there) or, live, of
+/exit_inspection/zone_verdicts. Start exit inspection (needs the live view) sends exits.yaml on
+/start_exit_inspection to exit_inspection_pass.py (exit_inspection exit_mission_launch.xml); Open report shows
+the latest reports/<stamp>/report.html.
+
 Needs only numpy: the PCD reader handles ascii, binary and binary_compressed (LZF) files,
 so the system python3 works (open3d is not needed).
 """
@@ -261,6 +267,54 @@ def read_points(path):
 
 # ---------------------------------------------------------------- live robot data (ROS 2)
 
+# ---------------------------------------------------------------- exit inspection (src/exit_inspection)
+
+EXIT_FIELDS = ("id", "type", "cls", "confirmed", "sign_center", "normal", "door_floor_center", "door_width")
+
+
+def read_exits(map_dir):
+    """Exits of the exit inspection (exit_inspection/exits.yaml next to the map) with the verdicts of its last report
+    (exit_inspection/exit_report.yaml). No folder or no file: no exits."""
+    import yaml
+    folder = os.path.join(map_dir, "exit_inspection")
+    out = {"folder": folder, "exits": [], "report": None}
+    path = os.path.join(folder, "exits.yaml")
+    if not os.path.isfile(path):
+        return out
+    with open(path) as f:
+        doc = yaml.safe_load(f) or {}
+    verdicts = {}
+    report_path = os.path.join(folder, "exit_report.yaml")
+    if os.path.isfile(report_path):
+        with open(report_path) as f:
+            report = yaml.safe_load(f) or {}
+        verdicts = {e.get("id"): e for e in report.get("exits") or []}
+        params = report.get("params") or {}
+        out["report"] = {"finished": report.get("finished"), "summary": report.get("summary"),
+                         "margin": params.get("margin", 0.5), "depth": params.get("depth", 3.0),
+                         "html": latest_report_html(folder)}
+    for e in doc.get("exits") or []:
+        item = {k: e.get(k) for k in EXIT_FIELDS}
+        found = verdicts.get(e.get("id"))
+        if found:
+            item.update(verdict=found.get("verdict"), reason=found.get("reason"), viewpoint=found.get("viewpoint"))
+        out["exits"].append(item)
+    out["path"] = path
+    return out
+
+
+def latest_report_html(folder):
+    """reports/<stamp>/report.html with the latest stamp, or None."""
+    reports = os.path.join(folder, "reports")
+    if not os.path.isdir(reports):
+        return None
+    for stamp in sorted(os.listdir(reports), reverse=True):
+        page = os.path.join(reports, stamp, "report.html")
+        if os.path.isfile(page):
+            return page
+    return None
+
+
 def quat_to_matrix(q):
     x, y, z, w = q.x, q.y, q.z, q.w
     return np.array([
@@ -345,6 +399,35 @@ class LiveBridge:
         self.String = String
         self.start_pub = self.node.create_publisher(String, "/start_inspection", 5)
 
+        # exit inspection: latest zone verdict per exit and the pass status (both latched by their nodes)
+        from rclpy.qos import DurabilityPolicy, QoSProfile
+        latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
+        self.zone_verdicts = {}
+        self.pass_status = None
+
+        def on_zone_verdicts(msg):
+            import yaml
+            try:
+                doc = yaml.safe_load(msg.data) or {}
+            except yaml.YAMLError:
+                return
+            with self.lock:
+                for e in doc.get("exits") or []:
+                    self.zone_verdicts[e.get("id")] = (time.monotonic(), e)
+
+        def on_pass_status(msg):
+            import yaml
+            try:
+                doc = yaml.safe_load(msg.data) or {}
+            except yaml.YAMLError:
+                return
+            with self.lock:
+                self.pass_status = doc
+
+        self.node.create_subscription(String, "/exit_inspection/zone_verdicts", on_zone_verdicts, latched)
+        self.node.create_subscription(String, "/exit_inspection/pass_status", on_pass_status, latched)
+        self.start_exits_pub = self.node.create_publisher(String, "/start_exit_inspection", 5)
+
         self.executor = SingleThreadedExecutor()
         self.executor.add_node(self.node)
         threading.Thread(target=self.executor.spin, daemon=True).start()
@@ -360,6 +443,22 @@ class LiveBridge:
                     "(same ROS_DOMAIN_ID as this server)")
         self.start_pub.publish(self.String(data=path))
         return None
+
+    def start_exit_inspection(self, path):
+        """Tells exit_inspection_pass.py to inspect the exits of the file path (empty: its own). None, or why not."""
+        if self.start_exits_pub.get_subscription_count() == 0:
+            return ("nobody listens on /start_exit_inspection: start exit_inspection exit_mission_launch.xml first "
+                    "(same ROS_DOMAIN_ID as this server)")
+        self.start_exits_pub.publish(self.String(data=path))
+        return None
+
+    def exits_live(self):
+        """Latest zone verdicts (id -> verdict, reason, age) and the pass status."""
+        now = time.monotonic()
+        with self.lock:
+            verdicts = {str(i): {"verdict": e.get("verdict"), "reason": e.get("reason"), "age": round(now - t, 1)}
+                        for i, (t, e) in self.zone_verdicts.items()}
+            return {"verdicts": verdicts, "pass": self.pass_status}
 
     def transform(self, target, source):
         """(R, t) taking points from source to target, with the latest TF."""
@@ -455,6 +554,20 @@ def make_handler(state):
                 if state["live"] is None:
                     return self.send(HTTPStatus.OK, {"ok": False, "error": state["meta"]["live_error"]})
                 return self.send(HTTPStatus.OK, state["live"].snapshot())
+            if url.path == "/api/exits":
+                try:
+                    out = read_exits(state["map_dir"])
+                except Exception as e:
+                    return self.send(HTTPStatus.UNPROCESSABLE_ENTITY, {"error": "cannot read the exits: %s" % e})
+                live = state["live"]
+                out["live"] = live.exits_live() if live is not None and hasattr(live, "exits_live") else None
+                return self.send(HTTPStatus.OK, out)
+            if url.path == "/api/report":
+                page = latest_report_html(os.path.join(state["map_dir"], "exit_inspection"))
+                if page is None:
+                    return self.send(HTTPStatus.NOT_FOUND, "no exit inspection report yet", "text/plain; charset=utf-8")
+                with open(page, "rb") as f:
+                    return self.send(HTTPStatus.OK, f.read(), "text/html; charset=utf-8")
             if url.path == "/api/graph":
                 name = parse_qs(url.query).get("name", [""])[0]
                 if not NAME_RE.match(name) or not name.endswith(".vgh"):
@@ -486,6 +599,17 @@ def make_handler(state):
             # other web pages open in the browser cannot write files through it.
             # /api/points saves the points; /api/inspection saves them and starts their inspection.
             api = urlparse(self.path).path
+            if api == "/api/exit_inspection" and \
+                    (self.headers.get("Content-Type") or "").startswith("application/json"):
+                exits = os.path.join(state["map_dir"], "exit_inspection", "exits.yaml")
+                if not os.path.isfile(exits):
+                    return self.send(HTTPStatus.BAD_REQUEST, {"error": "no %s: explore with exits:=true first" % exits})
+                live = state["live"]
+                error = "no ROS 2: " + state["meta"]["live_error"] if live is None else live.start_exit_inspection(exits)
+                if error:
+                    return self.send(HTTPStatus.SERVICE_UNAVAILABLE, {"error": error})
+                print("exit inspection of %s started" % exits, flush=True)
+                return self.send(HTTPStatus.OK, {"path": exits})
             if api not in ("/api/points", "/api/inspection") or \
                     not (self.headers.get("Content-Type") or "").startswith("application/json"):
                 return self.send(HTTPStatus.NOT_FOUND, {"error": "not found"})
@@ -590,7 +714,8 @@ def main():
     # sent as x, y, z, height above the local floor (for the page's "Hide floor")
     cloud = np.column_stack([xyz, height_above_floor(xyz)])
     state = {"meta": meta, "cloud": np.ascontiguousarray(cloud, dtype="<f4").tobytes(), "live": live,
-             "out_dir": out_dir, "graph_dir": graph_dir, "local_only": args.host in LOCAL_HOSTS}
+             "out_dir": out_dir, "graph_dir": graph_dir, "local_only": args.host in LOCAL_HOSTS,
+             "map_dir": os.path.dirname(pcd)}
     print("%d points (%d in the file), floor at z = %.2f m" % (len(xyz), n_total, meta["floor_z"]))
     print("live robot view: " + ("on, ROS_DOMAIN_ID=%s" % os.environ.get("ROS_DOMAIN_ID", "0") if live
                                  else meta["live_error"]))

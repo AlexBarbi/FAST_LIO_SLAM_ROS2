@@ -69,6 +69,14 @@ using std::endl;
 
 double keyframeMeterGap;
 double keyframeDegGap, keyframeRadGap;
+
+// A loop is kept only when its ICP pose, relative to the loop keyframe, agrees with the odometry (FAST-LIO) one
+// within what the odometry can have drifted over the path between the two keyframes: at most
+// loopMaxCorrection + loopMaxCorrectionRatio * path [m] and loopMaxRotCorrection [deg]. Scan Context is rotation
+// invariant and a symmetric room (an empty square) matches from the opposite corner, 15-30 m and ~180 deg away.
+double loopMaxCorrection = 1.0;
+double loopMaxCorrectionRatio = 0.05;
+double loopMaxRotCorrection = 15.0;
 double translationAccumulated = 1000000.0;
 double rotaionAccumulated = 1000000.0;
 
@@ -458,6 +466,10 @@ pcl::PointCloud<PointType>::Ptr transformPointCloud(
   return cloudOut;
 }  // transformPointCloud
 
+// root_idx >= 0: every keyframe placed at the pose of root_idx (the "virtual" current scan, put where the loop
+// keyframe is). root_idx < 0: every keyframe at its own pose, the submap as it is in the map. Upstream placed the
+// target submap at the root pose too: 51 scans taken along up to 50 m of path stacked on one pose, a smear any scan
+// fits under the ICP fitness threshold.
 void loopFindNearKeyframesCloud(pcl::PointCloud<PointType>::Ptr &nearKeyframes,
                                 const int &key, const int &submap_size,
                                 const int &root_idx) {
@@ -469,7 +481,7 @@ void loopFindNearKeyframesCloud(pcl::PointCloud<PointType>::Ptr &nearKeyframes,
 
     mKF.lock();
     *nearKeyframes += *local2global(keyframeLaserClouds[keyNear],
-                                    keyframePosesUpdated[root_idx]);
+                                    keyframePosesUpdated[root_idx >= 0 ? root_idx : keyNear]);
     mKF.unlock();
   }
 
@@ -495,7 +507,7 @@ std::optional<gtsam::Pose3> doICPVirtualRelative(int _loop_kf_idx,
   loopFindNearKeyframesCloud(cureKeyframeCloud, _curr_kf_idx, 0,
                              _loop_kf_idx);  // use same root of loop kf idx
   loopFindNearKeyframesCloud(targetKeyframeCloud, _loop_kf_idx,
-                             historyKeyframeSearchNum, _loop_kf_idx);
+                             historyKeyframeSearchNum, -1);  // the map around the loop keyframe
 
   // loop verification
   sensor_msgs::msg::PointCloud2 cureKeyframeCloudMsg;
@@ -539,18 +551,46 @@ std::optional<gtsam::Pose3> doICPVirtualRelative(int _loop_kf_idx,
               << std::endl;
   }
 
-  // Get pose transformation
+  // Get pose transformation. ICP moved the current scan, placed at the loop keyframe's pose (root), onto the map:
+  // the current keyframe is at correction * root, and relative to the loop keyframe at root^-1 * correction * root,
+  // what the BetweenFactor(loop, current) measures. (Upstream gave correction^-1, which is that only when both
+  // keyframes are at the same place: for a loop 3 m away it pulled the current keyframe 3 m the wrong way.)
   float x, y, z, roll, pitch, yaw;
   Eigen::Affine3f correctionLidarFrame;
   correctionLidarFrame = icp.getFinalTransformation();
   pcl::getTranslationAndEulerAngles(correctionLidarFrame, x, y, z, roll, pitch,
                                     yaw);
-  gtsam::Pose3 poseFrom =
+  gtsam::Pose3 correction =
       Pose3(Rot3::RzRyRx(roll, pitch, yaw), Point3(x, y, z));
-  gtsam::Pose3 poseTo =
-      Pose3(Rot3::RzRyRx(0.0, 0.0, 0.0), Point3(0.0, 0.0, 0.0));
 
-  return poseFrom.between(poseTo);
+  mKF.lock();
+  gtsam::Pose3 root = Pose6DtoGTSAMPose3(keyframePosesUpdated[_loop_kf_idx]);
+  gtsam::Pose3 odomLoop = Pose6DtoGTSAMPose3(keyframePoses[_loop_kf_idx]);
+  gtsam::Pose3 odomCurr = Pose6DtoGTSAMPose3(keyframePoses[_curr_kf_idx]);
+  double path = 0.0;  // odometry path between the two keyframes
+  for (int k = std::min(_loop_kf_idx, _curr_kf_idx); k < std::max(_loop_kf_idx, _curr_kf_idx); ++k) {
+    const Pose6D &a = keyframePoses[k];
+    const Pose6D &b = keyframePoses[k + 1];
+    path += std::sqrt((b.x - a.x) * (b.x - a.x) + (b.y - a.y) * (b.y - a.y) + (b.z - a.z) * (b.z - a.z));
+  }
+  mKF.unlock();
+
+  gtsam::Pose3 relative = root.between(correction * root);
+  gtsam::Pose3 odomRelative = odomLoop.between(odomCurr);
+  gtsam::Pose3 disagreement = odomRelative.between(relative);
+  double moved = disagreement.translation().norm();
+  double turned = rad2deg(gtsam::Rot3::Logmap(disagreement.rotation()).norm());
+  double maxMoved = loopMaxCorrection + loopMaxCorrectionRatio * path;
+  if (moved > maxMoved || turned > loopMaxRotCorrection) {
+    std::cout << "[SC loop] odometry test failed: ICP puts " << _curr_kf_idx << " " << moved << " m and " << turned
+              << " deg from where FAST-LIO has it relative to " << _loop_kf_idx << " (allowed " << maxMoved
+              << " m, " << loopMaxRotCorrection << " deg over " << path << " m of path). Reject this SC loop."
+              << std::endl;
+    return std::nullopt;
+  }
+  std::cout << "[SC loop] odometry test passed (" << moved << " m, " << turned << " deg). Add this SC loop."
+            << std::endl;
+  return relative;
 }  // doICPVirtualRelative
 
 template <typename PointT>
@@ -930,6 +970,13 @@ int main(int argc, char **argv) {
       20.0);  // 80 is recommended for outdoor, and lower (e.g., 20, 40) values
               // are recommended for indoor
   scMaximumRadius = nh->get_parameter("sc_max_radius").as_double();
+
+  nh->declare_parameter<double>("loop_max_correction", loopMaxCorrection);
+  loopMaxCorrection = nh->get_parameter("loop_max_correction").as_double();
+  nh->declare_parameter<double>("loop_max_correction_ratio", loopMaxCorrectionRatio);
+  loopMaxCorrectionRatio = nh->get_parameter("loop_max_correction_ratio").as_double();
+  nh->declare_parameter<double>("loop_max_rot_correction", loopMaxRotCorrection);
+  loopMaxRotCorrection = nh->get_parameter("loop_max_rot_correction").as_double();
 
   ISAM2Params parameters;
   parameters.relinearizeThreshold = 0.01;
